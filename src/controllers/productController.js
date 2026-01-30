@@ -22,9 +22,7 @@ class ProductController {
   async createProduct(req, res) {
     try {
       console.log("📥 Creating Product...");
-      console.log("📦 Body:", req.body);
-      console.log("📂 File:", req.file ? req.file.originalname : "No File");
-
+      
       const { 
         name, 
         description, 
@@ -51,8 +49,9 @@ class ProductController {
 
       // A. Upload Image to Supabase Storage (if provided)
       if (file) {
-        // Create a unique file name
-        const fileName = `product_${Date.now()}_${file.originalname.replace(/\s/g, '_')}`;
+        // Sanitize filename
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+        const fileName = `product_${Date.now()}_${safeName}`;
         
         // Upload to 'uploads' bucket
         const { data: uploadData, error: uploadError } = await supabase.storage
@@ -93,10 +92,7 @@ class ProductController {
         .select()
         .single();
 
-      if (error) {
-        console.error("❌ DB Insert Error:", error);
-        throw error;
-      }
+      if (error) throw error;
 
       res.status(201).json({ status: 'success', data });
 
@@ -106,15 +102,20 @@ class ProductController {
     }
   }
 
-  // 3. Delete Product (Admin Only)
+  // 3. Delete Product (Admin Only) - FIXED ID LOGIC
   async deleteProduct(req, res) {
     try {
       const { id } = req.params;
       
+      console.log(`🗑️ Request to Delete ID: ${id}`);
+
+      // 🚨 CRITICAL FIX: Clean the ID if it contains a colon (e.g., "uuid:1")
+      const cleanId = id.includes(':') ? id.split(':')[0] : id;
+
       const { error } = await supabase
         .from('products')
         .delete()
-        .eq('id', id);
+        .eq('id', cleanId);
 
       if (error) throw error;
 
@@ -123,6 +124,7 @@ class ProductController {
         message: 'Product deleted successfully' 
       });
     } catch (error) {
+      console.error("🔥 Delete Failed:", error.message);
       res.status(400).json({ status: 'error', message: error.message });
     }
   }

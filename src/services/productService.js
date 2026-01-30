@@ -8,18 +8,19 @@ class ProductService {
     let imageUrl = null;
 
     if (file) {
-      const fileName = `cover-${uuidv4()}-${file.originalname}`;
+      const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+      const fileName = `cover-${uuidv4()}-${safeName}`;
       
       const { error: uploadError } = await supabase
         .storage
-        .from('products')
+        .from('uploads') // Changed bucket name to 'uploads' to match Controller
         .upload(fileName, file.buffer, { contentType: file.mimetype });
 
       if (uploadError) throw new Error(`Image Upload Failed: ${uploadError.message}`);
 
       const { data: publicUrlData } = supabase
         .storage
-        .from('products')
+        .from('uploads')
         .getPublicUrl(fileName);
         
       imageUrl = publicUrlData.publicUrl;
@@ -32,15 +33,13 @@ class ProductService {
           name: data.name,
           description: data.description,
           image_url: imageUrl,
-          software_name: data.software_name,
+          price_1_day: parseFloat(data.price_1_day),
+          price_7_days: parseFloat(data.price_7_days || 0),
+          price_30_days: parseFloat(data.price_30_days || 0),
+          price_lifetime: parseFloat(data.price_lifetime || 0),
           download_link: data.download_link,
           tutorial_video_link: data.tutorial_video_link,
-          activation_process: data.activation_process,
-          price_1_day: parseFloat(data.price_1_day),
-          price_7_days: parseFloat(data.price_7_days),
-          price_30_days: parseFloat(data.price_30_days),
-          price_lifetime: parseFloat(data.price_lifetime),
-          created_by: data.user_id
+          activation_process: data.activation_process
         }
       ])
       .select()
@@ -52,9 +51,6 @@ class ProductService {
 
   // 2. Get All Products
   async getAllProducts() {
-    // Note: We don't filter by is_active anymore to allow Admins to see everything if needed, 
-    // OR we filter by is_active=true if we are soft deleting. 
-    // Since we are HARD DELETING below, simple select is fine.
     const { data, error } = await supabase
       .from('products')
       .select('*')
@@ -64,20 +60,17 @@ class ProductService {
     return data;
   }
 
-  // 3. Delete Product (NEW)
+  // 3. Delete Product
   async deleteProduct(productId) {
+    // Clean ID here too just in case
+    const cleanId = productId.includes(':') ? productId.split(':')[0] : productId;
+
     const { error } = await supabase
       .from('products')
       .delete()
-      .eq('id', productId);
+      .eq('id', cleanId);
 
-    if (error) {
-      // Handle foreign key constraint if ON DELETE SET NULL is not set
-      if (error.code === '23503') {
-        throw new Error('Cannot delete this product because it has associated orders/licenses.');
-      }
-      throw new Error(error.message);
-    }
+    if (error) throw new Error(error.message);
     
     return true;
   }
