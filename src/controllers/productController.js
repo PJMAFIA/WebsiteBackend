@@ -24,76 +24,51 @@ class ProductController {
       console.log("📥 Creating Product...");
       
       const { 
-        name, 
-        description, 
-        price_1_day, 
-        price_7_days, 
-        price_30_days, 
-        price_lifetime, 
-        download_link,
-        tutorial_video_link,
-        activation_process
+        name, description, price_1_day, price_7_days, price_30_days, 
+        price_lifetime, download_link, tutorial_video_link, activation_process
       } = req.body;
 
-      const file = req.file;
+      const files = req.files || []; 
 
-      // Basic Validation
       if (!name || !price_1_day) {
-        return res.status(400).json({ 
-          status: 'error', 
-          message: 'Product Name and at least 1 Day Price are required.' 
-        });
+        return res.status(400).json({ status: 'error', message: 'Product Name and Price are required.' });
       }
 
-      let imageUrl = null;
+      let imageUrls = [];
 
-      // A. Upload Image to Supabase Storage (if provided)
-      if (file) {
-        // Sanitize filename
-        const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
-        const fileName = `product_${Date.now()}_${safeName}`;
-        
-        // Upload to 'uploads' bucket
-        const { data: uploadData, error: uploadError } = await supabase.storage
-          .from('uploads')
-          .upload(fileName, file.buffer, {
-            contentType: file.mimetype,
-            upsert: false
-          });
-
-        if (uploadError) {
-          console.error("❌ Storage Upload Error:", uploadError);
-          throw new Error("Failed to upload image to storage");
-        }
-
-        // Get Public URL
-        const { data: urlData } = supabase.storage
-          .from('uploads')
-          .getPublicUrl(fileName);
+      // Upload Images
+      if (files && files.length > 0) {
+        for (const file of files) {
+          const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+          const fileName = `product_${Date.now()}_${Math.floor(Math.random()*1000)}_${safeName}`;
           
-        imageUrl = urlData.publicUrl;
+          const { error: uploadError } = await supabase.storage
+            .from('uploads')
+            .upload(fileName, file.buffer, { contentType: file.mimetype, upsert: false });
+
+          if (!uploadError) {
+            const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(fileName);
+            imageUrls.push(urlData.publicUrl);
+          }
+        }
       }
 
-      // B. Insert into Database
+      // Insert DB
       const { data, error } = await supabase
         .from('products')
         .insert([{
-          name,
-          description,
-          image_url: imageUrl,
+          name, description,
+          image_url: imageUrls.length > 0 ? imageUrls[0] : null,
+          images: imageUrls,
           price_1_day: parseFloat(price_1_day),
           price_7_days: parseFloat(price_7_days || 0),
           price_30_days: parseFloat(price_30_days || 0),
           price_lifetime: parseFloat(price_lifetime || 0),
-          download_link,
-          tutorial_video_link,
-          activation_process
+          download_link, tutorial_video_link, activation_process
         }])
-        .select()
-        .single();
+        .select().single();
 
       if (error) throw error;
-
       res.status(201).json({ status: 'success', data });
 
     } catch (error) {
@@ -102,27 +77,88 @@ class ProductController {
     }
   }
 
-  // 3. Delete Product (Admin Only) - FIXED ID LOGIC
-  async deleteProduct(req, res) {
+  // 3. Update Product (Admin Only) - ✅ FIX: Handles Image Merge & Price Updates
+  async updateProduct(req, res) {
     try {
       const { id } = req.params;
-      
-      console.log(`🗑️ Request to Delete ID: ${id}`);
+      console.log(`📝 Updating Product ID: ${id}`);
 
-      // 🚨 CRITICAL FIX: Clean the ID if it contains a colon (e.g., "uuid:1")
-      const cleanId = id.includes(':') ? id.split(':')[0] : id;
+      const { 
+        name, description, price_1_day, price_7_days, price_30_days, 
+        price_lifetime, download_link, tutorial_video_link, activation_process,
+        existing_images // ✅ Frontend sends this as a JSON string
+      } = req.body;
 
-      const { error } = await supabase
+      const files = req.files || [];
+
+      // A. Parse Existing Images (kept by user)
+      let finalImages = [];
+      try {
+        finalImages = existing_images ? JSON.parse(existing_images) : [];
+      } catch (e) {
+        console.error("Failed to parse existing_images:", e);
+        finalImages = [];
+      }
+
+      // B. Upload NEW images and Append
+      if (files && files.length > 0) {
+        for (const file of files) {
+          const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+          const fileName = `product_${Date.now()}_${Math.floor(Math.random()*1000)}_${safeName}`;
+          
+          const { error: uploadError } = await supabase.storage
+            .from('uploads')
+            .upload(fileName, file.buffer, { contentType: file.mimetype, upsert: false });
+
+          if (!uploadError) {
+            const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(fileName);
+            finalImages.push(urlData.publicUrl);
+          }
+        }
+      }
+
+      // C. Update Database
+      // Note: We use parseFloat() on prices to ensure they aren't saved as "NaN" or 0 if string is weird
+      const { data, error } = await supabase
         .from('products')
-        .delete()
-        .eq('id', cleanId);
+        .update({
+          name, 
+          description,
+          // Update main image to be the first one in the new list
+          image_url: finalImages.length > 0 ? finalImages[0] : null,
+          images: finalImages, 
+          price_1_day: parseFloat(price_1_day || 0),
+          price_7_days: parseFloat(price_7_days || 0),
+          price_30_days: parseFloat(price_30_days || 0),
+          price_lifetime: parseFloat(price_lifetime || 0),
+          download_link, 
+          tutorial_video_link, 
+          activation_process
+        })
+        .eq('id', id)
+        .select()
+        .single();
 
       if (error) throw error;
 
-      res.status(200).json({ 
-        status: 'success', 
-        message: 'Product deleted successfully' 
-      });
+      res.status(200).json({ status: 'success', data });
+
+    } catch (error) {
+      console.error("🔥 Update Product Error:", error.message);
+      res.status(400).json({ status: 'error', message: error.message });
+    }
+  }
+
+  // 4. Delete Product
+  async deleteProduct(req, res) {
+    try {
+      const { id } = req.params;
+      const cleanId = id.includes(':') ? id.split(':')[0] : id;
+
+      const { error } = await supabase.from('products').delete().eq('id', cleanId);
+      if (error) throw error;
+
+      res.status(200).json({ status: 'success', message: 'Product deleted successfully' });
     } catch (error) {
       console.error("🔥 Delete Failed:", error.message);
       res.status(400).json({ status: 'error', message: error.message });
