@@ -2,27 +2,32 @@ const express = require('express');
 const router = express.Router();
 const orderController = require('../controllers/orderController');
 const { protect, adminOnly } = require('../middlewares/authMiddleware');
-// If you are using Multer for file uploads locally before sending to Supabase:
 const upload = require('../middlewares/uploadMiddleware'); 
 
 // --- User Routes ---
 
-// Create Order
-// NOTE: Ensure your Frontend sends the file with key="paymentScreenshot"
+// 1. Create Order (Manual Upload with Screenshot)
 router.post(
   '/', 
   protect, 
-  // If you are NOT uploading files via this API (e.g. sending URL string), remove upload.single
   upload.single('paymentScreenshot'), 
   orderController.createOrder
 );
 
-// Get My Orders
+// 🔥 2. Wallet Purchase (Instant - NEW ROUTE)
+// This fixes the 404 Error. It MUST be defined before /:id routes
+router.post(
+  '/wallet', 
+  protect, 
+  orderController.purchaseWithWallet
+);
+
+// 3. Get My Orders
 router.get('/my-orders', protect, orderController.getMyOrders);
 
 // --- Admin Routes ---
 
-// Get All Orders
+// 4. Get All Orders
 router.get(
   '/admin/all', 
   protect, 
@@ -30,7 +35,7 @@ router.get(
   orderController.getAllOrders
 );
 
-// Approve/Reject Order
+// 5. Approve/Reject Order
 router.patch(
   '/:id/status', 
   protect, 

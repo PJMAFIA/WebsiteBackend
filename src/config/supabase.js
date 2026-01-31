@@ -21,7 +21,16 @@ const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     autoRefreshToken: false,
     persistSession: false
-  }
+  },
+  // 🔥 FIX: Force fresh requests (Disable Fetch Caching)
+  // This ensures every time we ask for a key, it checks the database afresh.
+  global: {
+    headers: {
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    },
+  },
 });
 
 module.exports = supabase;
