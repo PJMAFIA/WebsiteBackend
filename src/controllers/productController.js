@@ -25,7 +25,8 @@ class ProductController {
       
       const { 
         name, description, price_1_day, price_7_days, price_30_days, 
-        price_lifetime, download_link, tutorial_video_link, activation_process
+        price_lifetime, download_link, tutorial_video_link, activation_process,
+        currency_prices // ✅ Received as String from FormData
       } = req.body;
 
       const files = req.files || []; 
@@ -53,20 +54,41 @@ class ProductController {
         }
       }
 
+      // ✅ FIX: Parse currency_prices from JSON string
+      let parsedCurrencyPrices = {};
+      try {
+        if (currency_prices) {
+          parsedCurrencyPrices = JSON.parse(currency_prices);
+        }
+      } catch (e) {
+        console.error("Error parsing currency_prices:", e);
+        parsedCurrencyPrices = {};
+      }
+
       // Insert DB
       const { data, error } = await supabase
         .from('products')
         .insert([{
-          name, description,
+          name, 
+          description,
           image_url: imageUrls.length > 0 ? imageUrls[0] : null,
           images: imageUrls,
+          
+          // Base Prices (USD)
           price_1_day: parseFloat(price_1_day),
           price_7_days: parseFloat(price_7_days || 0),
           price_30_days: parseFloat(price_30_days || 0),
           price_lifetime: parseFloat(price_lifetime || 0),
-          download_link, tutorial_video_link, activation_process
+          
+          // ✅ Save parsed currency prices
+          currency_prices: parsedCurrencyPrices,
+
+          download_link, 
+          tutorial_video_link, 
+          activation_process
         }])
-        .select().single();
+        .select()
+        .single();
 
       if (error) throw error;
       res.status(201).json({ status: 'success', data });
@@ -77,7 +99,7 @@ class ProductController {
     }
   }
 
-  // 3. Update Product (Admin Only) - ✅ FIX: Handles Image Merge & Price Updates
+  // 3. Update Product (Admin Only)
   async updateProduct(req, res) {
     try {
       const { id } = req.params;
@@ -86,12 +108,13 @@ class ProductController {
       const { 
         name, description, price_1_day, price_7_days, price_30_days, 
         price_lifetime, download_link, tutorial_video_link, activation_process,
-        existing_images // ✅ Frontend sends this as a JSON string
+        existing_images, 
+        currency_prices // ✅ Received as String
       } = req.body;
 
       const files = req.files || [];
 
-      // A. Parse Existing Images (kept by user)
+      // A. Parse Existing Images
       let finalImages = [];
       try {
         finalImages = existing_images ? JSON.parse(existing_images) : [];
@@ -100,7 +123,7 @@ class ProductController {
         finalImages = [];
       }
 
-      // B. Upload NEW images and Append
+      // B. Upload NEW images
       if (files && files.length > 0) {
         for (const file of files) {
           const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
@@ -117,20 +140,35 @@ class ProductController {
         }
       }
 
+      // ✅ FIX: Parse currency_prices from JSON string
+      let parsedCurrencyPrices = {};
+      try {
+        if (currency_prices) {
+          parsedCurrencyPrices = JSON.parse(currency_prices);
+        }
+      } catch (e) {
+        console.error("Error parsing currency_prices update:", e);
+        parsedCurrencyPrices = {};
+      }
+
       // C. Update Database
-      // Note: We use parseFloat() on prices to ensure they aren't saved as "NaN" or 0 if string is weird
       const { data, error } = await supabase
         .from('products')
         .update({
           name, 
           description,
-          // Update main image to be the first one in the new list
           image_url: finalImages.length > 0 ? finalImages[0] : null,
           images: finalImages, 
+          
+          // Base Prices
           price_1_day: parseFloat(price_1_day || 0),
           price_7_days: parseFloat(price_7_days || 0),
           price_30_days: parseFloat(price_30_days || 0),
           price_lifetime: parseFloat(price_lifetime || 0),
+          
+          // ✅ Update currency prices
+          currency_prices: parsedCurrencyPrices,
+
           download_link, 
           tutorial_video_link, 
           activation_process

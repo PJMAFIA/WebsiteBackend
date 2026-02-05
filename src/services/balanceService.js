@@ -1,6 +1,15 @@
 const supabase = require('../config/supabase');
 const { v4: uuidv4 } = require('uuid');
 
+// ✅ Static Exchange Rates (Must match Frontend for consistency)
+const EXCHANGE_RATES = {
+  USD: 1,
+  GBP: 0.79,
+  INR: 83.50,
+  PKR: 278.00,
+  BDT: 117.00
+};
+
 class BalanceService {
 
   // 1. Create Request
@@ -27,6 +36,7 @@ class BalanceService {
       .insert([{
         user_id: data.userId,
         amount: data.amount,
+        currency: data.currency, // ✅ FIX: Save Currency to DB
         payment_method: data.paymentMethod,
         transaction_id: data.transactionId,
         payment_screenshot_url: screenshotUrl,
@@ -52,6 +62,7 @@ class BalanceService {
     return data.map(req => ({
       id: req.id,
       amount: parseFloat(req.amount),
+      currency: req.currency || 'USD', // ✅ Return currency
       paymentMethod: req.payment_method,
       transactionId: req.transaction_id,
       paymentScreenshot: req.payment_screenshot_url,
@@ -76,6 +87,7 @@ class BalanceService {
       userName: req.users?.full_name || 'Unknown',
       userEmail: req.users?.email || 'Unknown',
       amount: parseFloat(req.amount),
+      currency: req.currency || 'USD', // ✅ Return currency to Admin
       paymentMethod: req.payment_method,
       transactionId: req.transaction_id,
       paymentScreenshot: req.payment_screenshot_url,
@@ -84,7 +96,7 @@ class BalanceService {
     }));
   }
 
-  // 4. Approve Request (BRUTE FORCE ADMIN UPDATE)
+  // 4. Approve Request (With Currency Conversion)
   async approveRequest(requestId) {
     console.log(`🚀 STARTING APPROVAL: ${requestId}`);
 
@@ -98,9 +110,7 @@ class BalanceService {
     if (reqError || !request) throw new Error('Request not found');
     if (request.status === 'approved') throw new Error('Already approved');
 
-    console.log(`✅ Request Found. Amount: ${request.amount}, User: ${request.user_id}`);
-
-    // B. Fetch Current Balance (Admin Read)
+    // B. Fetch Current Balance
     const { data: user, error: userError } = await supabase
       .from('users')
       .select('balance')
@@ -110,23 +120,28 @@ class BalanceService {
     if (userError) throw new Error('User not found');
 
     const oldBalance = parseFloat(user.balance) || 0;
-    const amountToAdd = parseFloat(request.amount);
-    const newBalance = oldBalance + amountToAdd;
+    
+    // ✅ FIX: Convert Requested Amount to USD
+    // Since user balance is stored in USD, we must convert foreign currency requests.
+    const reqAmount = parseFloat(request.amount);
+    const reqCurrency = request.currency || 'USD';
+    const rate = EXCHANGE_RATES[reqCurrency] || 1;
+    
+    // Logic: Amount in USD = Amount / Rate
+    // Example: 278 PKR / 278 = $1 USD Added
+    const amountToAddInUsd = reqAmount / rate;
 
-    console.log(`💰 Math: ${oldBalance} + ${amountToAdd} = ${newBalance}`);
+    console.log(`💱 Converting: ${reqAmount} ${reqCurrency} -> $${amountToAddInUsd.toFixed(2)} USD`);
 
-    // C. Update Balance (Admin Write)
+    const newBalance = oldBalance + amountToAddInUsd;
+
+    // C. Update Balance
     const { error: updateError } = await supabase
       .from('users')
       .update({ balance: newBalance })
       .eq('id', request.user_id);
 
-    if (updateError) {
-      console.error("❌ Balance Update Failed:", updateError);
-      throw new Error(`DB Write Failed: ${updateError.message}`);
-    }
-
-    console.log("✅ Balance Updated Successfully");
+    if (updateError) throw new Error(`DB Write Failed: ${updateError.message}`);
 
     // D. Mark Request as Approved
     const { error: statusError } = await supabase

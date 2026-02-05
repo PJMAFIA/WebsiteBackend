@@ -6,6 +6,8 @@ exports.createRequest = async (req, res) => {
     const requestData = {
       userId: req.user.id,
       amount: parseFloat(req.body.amount),
+      // ✅ FIX: Capture the currency sent from Frontend
+      currency: req.body.currency || 'USD', 
       paymentMethod: req.body.paymentMethod,
       transactionId: req.body.transactionId,
     };
