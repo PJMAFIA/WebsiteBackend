@@ -1,8 +1,32 @@
 const supabase = require('../config/supabase');
+const sendEmail = require('../utils/emailService');
 
 class OrderController {
 
-  // 1. Create Order (Manual Upload) - No changes here
+  // Helper: Get localized price
+  async _getLocalizedPrice(productId, plan, userId) {
+    const { data: product } = await supabase.from('products').select('*').eq('id', productId).single();
+    const { data: user } = await supabase.from('users').select('currency').eq('id', userId).single();
+    if (!product || !user) throw new Error("Product or User not found");
+
+    const currency = user.currency || 'USD';
+    let price = 0;
+
+    if (currency !== 'USD' && product.currency_prices && product.currency_prices[currency]) {
+      price = product.currency_prices[currency][plan] || 0;
+    }
+    if (price === 0) {
+      switch (plan) {
+        case '1_day': price = product.price_1_day; break;
+        case '7_days': price = product.price_7_days; break;
+        case '30_days': price = product.price_30_days; break;
+        case 'lifetime': price = product.price_lifetime; break;
+      }
+    }
+    return { price, product, currency };
+  }
+
+  // 1. Create Order (Manual Upload) -> Notify Admin
   async createOrder(req, res) {
     try {
       console.log("📥 Creating Order (Manual)...");
@@ -17,28 +41,37 @@ class OrderController {
         const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
         const fileName = `order_${Date.now()}_${userId}_${safeName}`;
         const { error: uploadError } = await supabase.storage.from('uploads').upload(fileName, file.buffer, { contentType: file.mimetype, upsert: false });
-        if (uploadError) throw new Error("Failed to upload payment screenshot");
-        const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(fileName);
-        screenshotUrl = urlData.publicUrl;
+        if (!error) {
+          const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(fileName);
+          screenshotUrl = urlData.publicUrl;
+        }
       }
 
-      const { data: product } = await supabase.from('products').select('*').eq('id', productId).single();
-      if (!product) return res.status(404).json({ status: 'error', message: 'Product not found' });
+      const { price, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
 
-      let price = 0;
-      switch (plan) {
-        case '1_day': price = product.price_1_day; break;
-        case '7_days': price = product.price_7_days; break;
-        case '30_days': price = product.price_30_days; break;
-        case 'lifetime': price = product.price_lifetime; break;
-        default: return res.status(400).json({ status: 'error', message: 'Invalid Plan' });
-      }
+      // Fetch user details just for the email body content
+      const { data: user } = await supabase.from('users').select('email, full_name').eq('id', userId).single();
 
       const { data: newOrder, error } = await supabase.from('orders').insert([{
           user_id: userId, product_id: productId, plan, price, payment_method: paymentMethod, transaction_id: transactionId, payment_screenshot_url: screenshotUrl, status: 'pending'
         }]).select().single();
 
       if (error) throw error;
+
+      // 📧 EMAIL TO ADMIN (Static from .env)
+      if (process.env.ADMIN_EMAIL) {
+        console.log(`📨 Admin Alert: New Order Pending -> ${process.env.ADMIN_EMAIL}`);
+        await sendEmail(
+          process.env.ADMIN_EMAIL,
+          `🛒 New Order Pending: ${product.name}`,
+          `<h3>New Manual Order</h3>
+           <p><strong>User:</strong> ${user?.full_name} (${user?.email})</p>
+           <p><strong>Product:</strong> ${product.name} (${plan})</p>
+           <p><strong>Price:</strong> ${currency} ${price}</p>
+           <p>Please check the screenshot in Admin Panel.</p>`
+        );
+      }
+
       res.status(201).json({ status: 'success', data: newOrder });
 
     } catch (error) {
@@ -47,87 +80,55 @@ class OrderController {
     }
   }
 
-  // 🔥 2. Purchase with Wallet (ATOMIC VERSION - NO DUPLICATES)
+  // 2. Purchase with Wallet (Atomic) -> Notify User
   async purchaseWithWallet(req, res) {
     try {
       console.log("\n⚡ STARTING WALLET PURCHASE (ATOMIC MODE)...");
       const { productId, plan } = req.body;
       const userId = req.user.id;
 
-      // A. Get Product
-      const { data: product } = await supabase.from('products').select('*').eq('id', productId).single();
-      if (!product) return res.status(404).json({ message: 'Product not found' });
+      const { price, product } = await this._getLocalizedPrice(productId, plan, userId);
 
-      // B. Calculate Price
-      let price = 0;
-      switch (plan) {
-        case '1_day': price = product.price_1_day; break;
-        case '7_days': price = product.price_7_days; break;
-        case '30_days': price = product.price_30_days; break;
-        case 'lifetime': price = product.price_lifetime; break;
-        default: return res.status(400).json({ message: 'Invalid Plan' });
-      }
-
-      // C. Check Balance
-      const { data: user } = await supabase.from('users').select('balance').eq('id', userId).single();
-      if (!user) return res.status(404).json({ message: 'User not found' });
+      // Check Balance & Get User Email
+      const { data: user } = await supabase.from('users').select('balance, email, full_name').eq('id', userId).single();
       
       if (Number(user.balance) < price) {
         return res.status(400).json({ message: 'Insufficient wallet balance' });
       }
 
-      // D. Find AND Assign License (One Step)
-      console.log("🔍 Calling Atomic DB Function: assign_license_to_user...");
-      
-      // ✅ This function now takes the User ID too, so it can assign immediately
-      const { data: license, error: rpcError } = await supabase
-        .rpc('assign_license_to_user', { 
-          p_product_id: productId, 
-          p_plan: plan,
-          p_user_id: userId 
-        });
+      const { data: license, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+        p_product_id: productId, p_plan: plan, p_user_id: userId 
+      });
 
-      if (rpcError) {
-        console.error("❌ RPC Error:", rpcError);
-        return res.status(500).json({ message: "Database Error: " + rpcError.message });
-      }
-
-      if (!license) {
-        console.log("❌ Result: OUT OF STOCK.");
+      if (rpcError || !license) {
         return res.status(400).json({ message: `Out of Stock! No unused keys found for ${plan}.` });
       }
 
-      console.log(`✅ SUCCESS: Atomically Assigned License ID: ${license.id}`);
-      // Note: We don't need to manually update 'licenses' table anymore. It's done.
-
-      // E. Deduct Money
       const newBalance = Number(user.balance) - price;
-      const { error: balanceError } = await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
-      
-      if (balanceError) throw new Error("Failed to deduct balance");
+      await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
 
-      // G. Create Completed Order
-      // We use license.id which was returned from our atomic function
-      const { data: order, error: orderError } = await supabase
-        .from('orders')
-        .insert([{
-          user_id: userId,
-          product_id: productId,
-          plan,
-          price,
-          payment_method: 'wallet',
-          transaction_id: `WALLET-${Date.now()}`,
-          status: 'completed',
-          license_keys_id: license.id // Link the key we just secured
-        }])
-        .select().single();
+      const { data: order, error: orderError } = await supabase.from('orders').insert([{
+          user_id: userId, product_id: productId, plan, price, payment_method: 'wallet', 
+          transaction_id: `WALLET-${Date.now()}`, status: 'completed', license_keys_id: license.id
+        }]).select().single();
 
-      if (orderError) {
-        console.error("❌ Order Creation Failed:", orderError);
-        throw orderError;
+      if (orderError) throw orderError;
+
+      // 📧 EMAIL TO USER (Dynamic fetch)
+      if (user.email) {
+        console.log(`📨 User Notification: Order Complete -> ${user.email}`);
+        await sendEmail(
+          user.email,
+          `✅ Order Confirmed: ${product.name}`,
+          `<h3>Thank you for your purchase!</h3>
+           <p>Here is your license key for <strong>${product.name}</strong>:</p>
+           <div style="background:#f3f4f6; padding:15px; border-radius:5px; font-family:monospace; font-size:16px;">
+             ${license.key}
+           </div>
+           <p>You can download the software from your dashboard.</p>`
+        );
       }
 
-      console.log("✅ Wallet Purchase Successful!");
       res.status(200).json({ status: 'success', data: order });
 
     } catch (error) {
@@ -136,7 +137,7 @@ class OrderController {
     }
   }
 
-  // ... (Keep existing getMyOrders, getAllOrders, updateStatus functions) ...
+  // Getters (Unchanged)
   async getMyOrders(req, res) {
     try {
       const { data, error } = await supabase.from('orders').select(`*, products ( name, image_url, download_link, tutorial_video_link, activation_process ), licenses ( key, status )`).eq('user_id', req.user.id).order('created_at', { ascending: false });
@@ -153,32 +154,55 @@ class OrderController {
     } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
   }
 
+  // Update Status -> Notify User if Completed
   async updateStatus(req, res) {
     try {
       const { id } = req.params; const { status } = req.body; 
+      
+      // Fetch order + user email
+      const { data: currentOrder } = await supabase.from('orders').select('*, users!inner(email, full_name), products(name)').eq('id', id).single();
+
       if (status === 'rejected') {
         const { data, error } = await supabase.from('orders').update({ status: 'rejected' }).eq('id', id).select().single();
         if (error) throw error; return res.status(200).json({ status: 'success', data });
       }
+
       if (status === 'completed') {
-        const { data: order } = await supabase.from('orders').select('*').eq('id', id).single();
-        if (!order) throw new Error("Order not found");
-        
-        // Note: For manual admin approval, we can use the same atomic logic or keep it manual.
-        // Keeping it consistent:
+        if (!currentOrder) throw new Error("Order not found");
+
         const { data: license, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
-           p_product_id: order.product_id, 
-           p_plan: order.plan,
-           p_user_id: order.user_id 
+           p_product_id: currentOrder.product_id, p_plan: currentOrder.plan, p_user_id: currentOrder.user_id 
         });
 
-        if (!license || rpcError) return res.status(400).json({ status: 'error', message: `No stock available for '${order.plan}' plan!` });
+        if (!license || rpcError) return res.status(400).json({ status: 'error', message: `No stock available for '${currentOrder.plan}' plan!` });
 
         const { data: updatedOrder, error } = await supabase.from('orders').update({ status: 'completed', license_keys_id: license.id }).eq('id', id).select().single();
-        if (error) throw error; return res.status(200).json({ status: 'success', data: updatedOrder });
+        if (error) throw error; 
+
+        // 📧 EMAIL TO USER (Dynamic fetch from order relation)
+        if (currentOrder.users?.email) {
+          console.log(`📨 User Notification: Order Approved -> ${currentOrder.users.email}`);
+          await sendEmail(
+            currentOrder.users.email,
+            `✅ Order Approved: ${currentOrder.products?.name}`,
+            `<h3>Your Order is Complete!</h3>
+             <p>Your payment for <strong>${currentOrder.products?.name}</strong> has been approved.</p>
+             <p><strong>License Key:</strong></p>
+             <div style="background:#f3f4f6; padding:15px; border-radius:5px; font-family:monospace; font-size:16px;">
+               ${license.key}
+             </div>`
+          );
+        }
+
+        return res.status(200).json({ status: 'success', data: updatedOrder });
       }
     } catch (error) { res.status(400).json({ status: 'error', message: error.message }); }
   }
 }
 
-module.exports = new OrderController();
+const controller = new OrderController();
+controller.createOrder = controller.createOrder.bind(controller);
+controller.purchaseWithWallet = controller.purchaseWithWallet.bind(controller);
+controller.updateStatus = controller.updateStatus.bind(controller);
+
+module.exports = controller;

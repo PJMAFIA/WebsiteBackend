@@ -2,28 +2,39 @@ const supabase = require('../config/supabase');
 
 class AuthService {
 
-  // REGISTER
+  // REGISTER (Admin API to auto-confirm)
   async register(email, password, fullName) {
     try {
-      // 1. Create user in Supabase Auth System
-      // We use the Admin API to create the user securely.
-      const { data, error } = await supabase.auth.admin.createUser({
-        email: email,
-        password: password,
-        email_confirm: true, // Auto-confirm email so they can login immediately
-        user_metadata: {
-          full_name: fullName // This is passed to the Trigger to fill the public table
-        }
+      // 1. Create user in Supabase Auth (Auto Confirmed)
+      const { data: authData, error: authError } = await supabase.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true, 
+        user_metadata: { full_name: fullName }
       });
 
-      if (error) throw error;
+      if (authError) throw authError;
 
-      // 2. THAT'S IT!
-      // You do NOT need to insert into 'users' table manually.
-      // The SQL Trigger 'on_auth_user_created' we ran earlier does it automatically.
+      // 2. Upsert into public table
+      const { data: userData, error: dbError } = await supabase
+        .from('users')
+        .upsert([{
+          id: authData.user.id,
+          email: email,
+          full_name: fullName,
+          role: 'user',
+          balance: 0,
+          currency: 'USD'
+        }])
+        .select()
+        .single();
 
-      return data.user;
+      if (dbError) {
+        await supabase.auth.admin.deleteUser(authData.user.id); // Rollback
+        throw new Error(dbError.message);
+      }
 
+      return userData;
     } catch (error) {
       console.error("Registration Error:", error.message);
       throw new Error(error.message);
@@ -32,31 +43,33 @@ class AuthService {
 
   // LOGIN
   async login(email, password) {
-    // 1. Authenticate with Supabase
+    // 1. Sign In
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password
     });
 
-    if (error) {
-      throw new Error('Invalid login credentials');
-    }
+    if (error) throw new Error('Invalid login credentials');
 
-    // 2. Get User Profile (Role, Balance, etc.)
-    const { data: userProfile, error: profileError } = await supabase
+    // 2. Fetch Profile
+    const { data: userProfile } = await supabase
       .from('users')
       .select('*')
       .eq('id', data.user.id)
       .single();
 
-    if (profileError) {
-      // If profile is missing (rare sync issue), return basic auth data
-      console.warn("User profile not found in public table, returning auth data only.");
-    }
-
+    // 3. Return Data (Aligned with Frontend)
     return {
-      user: userProfile || { ...data.user, role: 'user' },
-      accessToken: data.session.access_token,
+      user: {
+        id: data.user.id,
+        email: data.user.email,
+        name: userProfile?.full_name || data.user.user_metadata.full_name,
+        role: userProfile?.role || 'user',
+        balance: userProfile?.balance || 0,
+        currency: userProfile?.currency || 'USD'
+      },
+      // ✅ FIX: Variable name is 'token'
+      token: data.session.access_token, 
       refreshToken: data.session.refresh_token
     };
   }

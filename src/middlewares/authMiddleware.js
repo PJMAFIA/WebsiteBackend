@@ -1,61 +1,50 @@
 const supabase = require('../config/supabase');
 
-// 🛡️ Middleware: Protect Routes
 exports.protect = async (req, res, next) => {
   let token;
 
-  // 1. Get token
+  // 1. Check for token in headers
   if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-    token = req.headers.authorization.split(' ')[1];
-  }
+    try {
+      token = req.headers.authorization.split(' ')[1];
 
-  if (!token) {
-    return res.status(401).json({ status: 'error', message: 'Not authorized, no token provided' });
-  }
+      // 2. Verify token with Supabase
+      const { data: { user }, error } = await supabase.auth.getUser(token);
 
-  try {
-    // 2. Verify token
-    const { data: { user }, error } = await supabase.auth.getUser(token);
+      if (error || !user) {
+        throw new Error('Invalid Token');
+      }
 
-    if (error) {
-      // 🚨 LOG THE SPECIFIC ERROR TO TERMINAL
-      console.error("❌ Supabase Auth Verification Failed:");
-      console.error("   - Token sent by frontend:", token.substring(0, 15) + "...");
-      console.error("   - Error Message:", error.message);
+      // 3. Attach user profile to request (Role is critical for Admin checks)
+      const { data: userProfile } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', user.id)
+        .single();
+
+      // Merge Auth User + Public Profile
+      req.user = { 
+        ...user, 
+        role: userProfile?.role || 'user',
+        balance: userProfile?.balance || 0,
+        currency: userProfile?.currency || 'USD'
+      };
       
-      return res.status(401).json({ 
-        status: 'error', 
-        message: `Token Verification Failed: ${error.message}` 
-      });
+      next();
+
+    } catch (error) {
+      console.error("❌ Auth Middleware Error:", error.message);
+      return res.status(401).json({ status: 'error', message: 'Not authorized, token failed' });
     }
-
-    if (!user) {
-      return res.status(401).json({ status: 'error', message: 'User not found' });
-    }
-
-    req.user = user; 
-    next();
-
-  } catch (error) {
-    console.error("🔥 Middleware Crash:", error.message);
-    res.status(401).json({ status: 'error', message: 'Not authorized, token failed' });
+  } else {
+    return res.status(401).json({ status: 'error', message: 'Not authorized, no token' });
   }
 };
 
-// 🛡️ Middleware: Admin Only
-exports.adminOnly = async (req, res, next) => {
-  try {
-    const { data: userProfile } = await supabase
-      .from('users')
-      .select('role')
-      .eq('id', req.user.id)
-      .single();
-
-    if (!userProfile || userProfile.role !== 'admin') {
-      return res.status(403).json({ status: 'error', message: 'Access denied. Admins only.' });
-    }
+exports.adminOnly = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
     next();
-  } catch (error) {
-    res.status(500).json({ status: 'error', message: 'Authorization check failed' });
+  } else {
+    res.status(403).json({ status: 'error', message: 'Access denied. Admins only.' });
   }
 };
