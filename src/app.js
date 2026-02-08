@@ -11,6 +11,7 @@ const productRoutes = require('./routes/productRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const licenseRoutes = require('./routes/licenseRoutes');
 const balanceRoutes = require('./routes/balanceRoutes'); 
+const resetRoutes = require('./routes/resetRoutes'); // ✅ ADDED
 
 const app = express();
 
@@ -30,14 +31,14 @@ app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/licenses', licenseRoutes);
 app.use('/api/balance', balanceRoutes);
+app.use('/api/resets', resetRoutes); // ✅ MOUNTED
 
 // --- Base Route ---
 app.get('/', (req, res) => {
   res.json({ message: '🚀 Premium SaaS API is running' });
 });
 
-// --- 404 Handler (FIXED) ---
-// Changed from app.all('*') to app.use() to prevent PathError
+// --- 404 Handler ---
 app.use((req, res) => {
   res.status(404).json({
     status: 'error',
