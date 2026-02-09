@@ -12,6 +12,7 @@ const orderRoutes = require('./routes/orderRoutes');
 const licenseRoutes = require('./routes/licenseRoutes');
 const balanceRoutes = require('./routes/balanceRoutes'); 
 const resetRoutes = require('./routes/resetRoutes'); // ✅ ADDED
+const promoRoutes = require('./routes/promoRoutes');
 
 const app = express();
 
@@ -32,6 +33,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/licenses', licenseRoutes);
 app.use('/api/balance', balanceRoutes);
 app.use('/api/resets', resetRoutes); // ✅ MOUNTED
+app.use('/api/promos', promoRoutes); // ✅ MOUNTED
 
 // --- Base Route ---
 app.get('/', (req, res) => {

@@ -26,7 +26,7 @@ class OrderController {
     return { price, product, currency };
   }
 
-  // 1. Create Order (Manual Upload) -> Notify Admin
+  // 1. Create Order (Manual)
   async createOrder(req, res) {
     try {
       console.log("📥 Creating Order (Manual)...");
@@ -41,15 +41,13 @@ class OrderController {
         const safeName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
         const fileName = `order_${Date.now()}_${userId}_${safeName}`;
         const { error: uploadError } = await supabase.storage.from('uploads').upload(fileName, file.buffer, { contentType: file.mimetype, upsert: false });
-        if (!error) {
+        if (!uploadError) {
           const { data: urlData } = supabase.storage.from('uploads').getPublicUrl(fileName);
           screenshotUrl = urlData.publicUrl;
         }
       }
 
       const { price, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
-
-      // Fetch user details just for the email body content
       const { data: user } = await supabase.from('users').select('email, full_name').eq('id', userId).single();
 
       const { data: newOrder, error } = await supabase.from('orders').insert([{
@@ -58,18 +56,10 @@ class OrderController {
 
       if (error) throw error;
 
-      // 📧 EMAIL TO ADMIN (Static from .env)
       if (process.env.ADMIN_EMAIL) {
         console.log(`📨 Admin Alert: New Order Pending -> ${process.env.ADMIN_EMAIL}`);
-        await sendEmail(
-          process.env.ADMIN_EMAIL,
-          `🛒 New Order Pending: ${product.name}`,
-          `<h3>New Manual Order</h3>
-           <p><strong>User:</strong> ${user?.full_name} (${user?.email})</p>
-           <p><strong>Product:</strong> ${product.name} (${plan})</p>
-           <p><strong>Price:</strong> ${currency} ${price}</p>
-           <p>Please check the screenshot in Admin Panel.</p>`
-        );
+        await sendEmail(process.env.ADMIN_EMAIL, `🛒 New Order Pending: ${product.name}`, 
+          `<h3>New Manual Order</h3><p>User: ${user?.full_name}</p><p>Price: ${currency} ${price}</p>`);
       }
 
       res.status(201).json({ status: 'success', data: newOrder });
@@ -80,22 +70,67 @@ class OrderController {
     }
   }
 
-  // 2. Purchase with Wallet (Atomic) -> Notify User
+  // 2. Purchase with Wallet (Supports Promo Codes)
   async purchaseWithWallet(req, res) {
     try {
-      console.log("\n⚡ STARTING WALLET PURCHASE (ATOMIC MODE)...");
-      const { productId, plan } = req.body;
+      console.log("\n⚡ STARTING WALLET PURCHASE...");
+      const { productId, plan, promoCode } = req.body;
       const userId = req.user.id;
 
-      const { price, product } = await this._getLocalizedPrice(productId, plan, userId);
+      let { price, product } = await this._getLocalizedPrice(productId, plan, userId);
+      let discountApplied = 0;
 
-      // Check Balance & Get User Email
+      // 🏷️ 1. Validate & Apply Promo Code
+      if (promoCode) {
+        const { data: promo, error: promoError } = await supabase
+          .from('promo_codes')
+          .select('*')
+          .eq('code', promoCode)
+          .eq('is_active', true)
+          .single();
+
+        if (promo) {
+          // Check Constraints
+          const isExpired = promo.expires_at && new Date(promo.expires_at) < new Date();
+          const isLimitReached = promo.max_uses !== null && promo.uses_count >= promo.max_uses;
+
+          if (isExpired) {
+             return res.status(400).json({ message: 'Promo code has expired.' });
+          }
+          if (isLimitReached) {
+             return res.status(400).json({ message: 'Promo code usage limit reached.' });
+          }
+
+          // Apply Discount
+          if (promo.type === 'percent') {
+            discountApplied = (price * promo.value) / 100;
+          } else {
+            discountApplied = promo.value;
+          }
+          
+          // Ensure price doesn't go below 0
+          price = Math.max(0, price - discountApplied);
+
+          // ✅ FIX: Increment Usage using Secure RPC (prevents RLS errors)
+          const { error: rpcError } = await supabase.rpc('increment_promo_usage', { promo_code: promo.code });
+          if (rpcError) {
+             console.error("❌ Failed to increment promo usage:", rpcError);
+             // Fail safe: If RPC missing, try direct update (might fail due to RLS)
+             await supabase.from('promo_codes').update({ uses_count: promo.uses_count + 1 }).eq('id', promo.id);
+          }
+          
+          console.log(`✅ Promo Applied: ${promo.code} (-${discountApplied})`);
+        }
+      }
+
+      // 💰 2. Check Balance
       const { data: user } = await supabase.from('users').select('balance, email, full_name').eq('id', userId).single();
       
       if (Number(user.balance) < price) {
         return res.status(400).json({ message: 'Insufficient wallet balance' });
       }
 
+      // 📦 3. Assign License
       const { data: license, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
         p_product_id: productId, p_plan: plan, p_user_id: userId 
       });
@@ -104,29 +139,28 @@ class OrderController {
         return res.status(400).json({ message: `Out of Stock! No unused keys found for ${plan}.` });
       }
 
+      // 💳 4. Deduct Balance
       const newBalance = Number(user.balance) - price;
       await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
 
+      // 📝 5. Create Order Record
       const { data: order, error: orderError } = await supabase.from('orders').insert([{
-          user_id: userId, product_id: productId, plan, price, payment_method: 'wallet', 
-          transaction_id: `WALLET-${Date.now()}`, status: 'completed', license_keys_id: license.id
+          user_id: userId, 
+          product_id: productId, 
+          plan, 
+          price, // Final discounted price
+          payment_method: 'wallet', 
+          transaction_id: `WALLET-${Date.now()}`, 
+          status: 'completed', 
+          license_keys_id: license.id
         }]).select().single();
 
       if (orderError) throw orderError;
 
-      // 📧 EMAIL TO USER (Dynamic fetch)
+      // 📧 6. Email User
       if (user.email) {
-        console.log(`📨 User Notification: Order Complete -> ${user.email}`);
-        await sendEmail(
-          user.email,
-          `✅ Order Confirmed: ${product.name}`,
-          `<h3>Thank you for your purchase!</h3>
-           <p>Here is your license key for <strong>${product.name}</strong>:</p>
-           <div style="background:#f3f4f6; padding:15px; border-radius:5px; font-family:monospace; font-size:16px;">
-             ${license.key}
-           </div>
-           <p>You can download the software from your dashboard.</p>`
-        );
+        await sendEmail(user.email, `✅ Order Confirmed: ${product.name}`, 
+          `<h3>Thank you for your purchase!</h3><p>Price Paid: ${price}</p><p>Key: ${license.key}</p>`);
       }
 
       res.status(200).json({ status: 'success', data: order });
@@ -137,63 +171,54 @@ class OrderController {
     }
   }
 
-  // Getters (Unchanged)
-  async getMyOrders(req, res) {
-    try {
-      const { data, error } = await supabase.from('orders').select(`*, products ( name, image_url, download_link, tutorial_video_link, activation_process ), licenses ( key, status )`).eq('user_id', req.user.id).order('created_at', { ascending: false });
-      if (error) throw error;
-      res.status(200).json({ status: 'success', data });
-    } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
+  // Getters
+ // This is already in your code, keeping it here for verification
+async getMyOrders(req, res) {
+  try {
+    const { data, error } = await supabase
+      .from('orders')
+      // Selects ALL fields (*) including transaction_id, plus related data
+      .select(`*, products ( name, image_url, download_link, tutorial_video_link, activation_process ), licenses ( key, status )`)
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.status(200).json({ status: 'success', data });
+  } catch (error) { 
+    res.status(500).json({ status: 'error', message: error.message }); 
   }
+}
 
   async getAllOrders(req, res) {
     try {
-      const { data, error } = await supabase.from('orders').select(`*, users ( email, full_name ), products ( name )`).order('created_at', { ascending: false });
+      const { data, error } = await supabase.from('orders').select(`*, users(email, full_name), products(name)`).order('created_at', { ascending: false });
       if (error) throw error;
       res.status(200).json({ status: 'success', data });
     } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
   }
 
-  // Update Status -> Notify User if Completed
+  // Update Status
   async updateStatus(req, res) {
     try {
       const { id } = req.params; const { status } = req.body; 
-      
-      // Fetch order + user email
-      const { data: currentOrder } = await supabase.from('orders').select('*, users!inner(email, full_name), products(name)').eq('id', id).single();
+      const { data: currentOrder } = await supabase.from('orders').select('*, users!inner(email), products(name)').eq('id', id).single();
 
       if (status === 'rejected') {
-        const { data, error } = await supabase.from('orders').update({ status: 'rejected' }).eq('id', id).select().single();
-        if (error) throw error; return res.status(200).json({ status: 'success', data });
+        const { data } = await supabase.from('orders').update({ status: 'rejected' }).eq('id', id).select().single();
+        return res.status(200).json({ status: 'success', data });
       }
 
       if (status === 'completed') {
-        if (!currentOrder) throw new Error("Order not found");
-
         const { data: license, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
            p_product_id: currentOrder.product_id, p_plan: currentOrder.plan, p_user_id: currentOrder.user_id 
         });
+        if (!license || rpcError) return res.status(400).json({ status: 'error', message: "Out of Stock" });
 
-        if (!license || rpcError) return res.status(400).json({ status: 'error', message: `No stock available for '${currentOrder.plan}' plan!` });
-
-        const { data: updatedOrder, error } = await supabase.from('orders').update({ status: 'completed', license_keys_id: license.id }).eq('id', id).select().single();
-        if (error) throw error; 
-
-        // 📧 EMAIL TO USER (Dynamic fetch from order relation)
+        const { data: updatedOrder } = await supabase.from('orders').update({ status: 'completed', license_keys_id: license.id }).eq('id', id).select().single();
+        
         if (currentOrder.users?.email) {
-          console.log(`📨 User Notification: Order Approved -> ${currentOrder.users.email}`);
-          await sendEmail(
-            currentOrder.users.email,
-            `✅ Order Approved: ${currentOrder.products?.name}`,
-            `<h3>Your Order is Complete!</h3>
-             <p>Your payment for <strong>${currentOrder.products?.name}</strong> has been approved.</p>
-             <p><strong>License Key:</strong></p>
-             <div style="background:#f3f4f6; padding:15px; border-radius:5px; font-family:monospace; font-size:16px;">
-               ${license.key}
-             </div>`
-          );
+          await sendEmail(currentOrder.users.email, `✅ Order Approved: ${currentOrder.products?.name}`, `<h3>Key:</h3><p>${license.key}</p>`);
         }
-
         return res.status(200).json({ status: 'success', data: updatedOrder });
       }
     } catch (error) { res.status(400).json({ status: 'error', message: error.message }); }
