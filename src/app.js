@@ -11,8 +11,9 @@ const productRoutes = require('./routes/productRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const licenseRoutes = require('./routes/licenseRoutes');
 const balanceRoutes = require('./routes/balanceRoutes'); 
-const resetRoutes = require('./routes/resetRoutes'); // ✅ ADDED
+const resetRoutes = require('./routes/resetRoutes'); 
 const promoRoutes = require('./routes/promoRoutes');
+const adminRoutes = require('./routes/adminRoutes'); // ✅ ADDED THIS IMPORT
 
 const app = express();
 
@@ -32,8 +33,9 @@ app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/licenses', licenseRoutes);
 app.use('/api/balance', balanceRoutes);
-app.use('/api/resets', resetRoutes); // ✅ MOUNTED
-app.use('/api/promos', promoRoutes); // ✅ MOUNTED
+app.use('/api/resets', resetRoutes); 
+app.use('/api/promos', promoRoutes); 
+app.use('/api/admin', adminRoutes); // ✅ MOUNTED HERE
 
 // --- Base Route ---
 app.get('/', (req, res) => {
