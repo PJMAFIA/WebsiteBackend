@@ -18,9 +18,10 @@ router.post('/oxapay/create-payment', protect, async (req, res) => {
 
     // 1. Validate Amount (Must be a Number)
     const numericAmount = parseFloat(amount);
-    if (!numericAmount || numericAmount < 2) { 
-      return res.status(400).json({ status: 'error', message: 'Minimum amount is $2' });
-    }
+    // ✅ New Code (Allows $1)
+if (!numericAmount || numericAmount < 0.01) { 
+   return res.status(400).json({ status: 'error', message: 'Minimum amount is $0.01' });
+}
 
     // 2. Validate API Key
     const merchantKey = process.env.OXAPAY_MERCHANT_KEY;
