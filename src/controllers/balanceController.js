@@ -1,5 +1,6 @@
 const balanceService = require('../services/balanceService');
-const sendEmail = require('../utils/emailService');
+// ✅ FIX: Destructured Import (Matches the Service Export)
+const { sendEmail } = require('../utils/emailService'); 
 const supabase = require('../config/supabase');
 
 // 1. Create Request (User submits -> Notify Admin)
@@ -22,9 +23,10 @@ exports.createRequest = async (req, res) => {
 
     const request = await balanceService.createRequest(requestData, req.file);
 
-    // 📧 EMAIL TO ADMIN (Static from .env)
+    // 📧 EMAIL TO ADMIN
     if (process.env.ADMIN_EMAIL) {
       console.log(`📨 Admin Alert: New Balance Request -> ${process.env.ADMIN_EMAIL}`);
+      // ✅ Now 'sendEmail' is correctly defined as a function
       await sendEmail(
         process.env.ADMIN_EMAIL,
         '💰 New Balance Request Pending',
@@ -72,11 +74,10 @@ exports.approveRequest = async (req, res) => {
   try {
     await balanceService.approveRequest(req.params.id);
 
-    // 📧 EMAIL TO USER (Dynamic fetch from DB)
-    // 1. Fetch the request details, including the linked User's email
+    // 📧 EMAIL TO USER
     const { data: reqData } = await supabase
       .from('balance_requests')
-      .select('amount, currency, users!inner(email, full_name)') // !inner ensures we get user data
+      .select('amount, currency, users!inner(email, full_name)')
       .eq('id', req.params.id)
       .single();
 
@@ -92,8 +93,6 @@ exports.approveRequest = async (req, res) => {
          <p>Your deposit of <strong>${reqData.currency} ${reqData.amount}</strong> has been approved and added to your wallet.</p>
          <p>Happy Shopping!</p>`
       );
-    } else {
-      console.warn("⚠️ User email not found for this request.");
     }
 
     res.status(200).json({ status: 'success', message: 'Request approved' });
