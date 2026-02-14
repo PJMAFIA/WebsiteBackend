@@ -1,33 +1,46 @@
-const nodemailer = require('nodemailer');
-
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-  family: 4, // 🚀 FORCE IPv4 (Fixes Render Delay)
-});
-
 const sendEmail = async (to, subject, htmlContent) => {
-  try {
-    const mailOptions = {
-      from: `"Universal Store" <${process.env.EMAIL_USER}>`,
-      to,
-      subject,
-      html: htmlContent,
-    };
+  const apiKey = process.env.BREVO_API_KEY;
+  const senderEmail = process.env.ADMIN_EMAIL || 'pjmafiaff123@gmail.com'; 
+  const senderName = 'Universal Store';
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`📧 Email sent: ${info.messageId}`);
+  if (!apiKey) {
+    console.error("❌ Email Error: BREVO_API_KEY is missing.");
+    return false;
+  }
+
+  const url = 'https://api.brevo.com/v3/smtp/email';
+
+  const options = {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': apiKey,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      sender: { name: senderName, email: senderEmail },
+      to: [{ email: to }],
+      subject: subject,
+      htmlContent: htmlContent
+    })
+  };
+
+  try {
+    const response = await fetch(url, options);
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("❌ Brevo API Error:", JSON.stringify(data));
+      return false;
+    }
+
+    console.log(`📧 Email sent via Brevo! Message ID: ${data.messageId}`);
     return true;
+
   } catch (error) {
-    console.error("❌ Email Error:", error);
+    console.error("❌ Network/Fetch Error:", error);
     return false;
   }
 };
 
-// ✅ FIX: Named Export (Matches the Controller's Destructuring)
 module.exports = { sendEmail };
