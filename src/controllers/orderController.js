@@ -241,7 +241,8 @@ class OrderController {
   }
 
   // Getters
- async getMyOrders(req, res) {
+ // Getters: Updated to properly fetch the license key string
+  async getMyOrders(req, res) {
     try {
       const { data, error } = await supabase
         .from('orders')
