@@ -8,16 +8,20 @@ class UserController {
       // req.user.id comes from the Auth Middleware (the Token)
       const userId = req.user.id;
 
-      // 🔍 We must query the 'users' table to get the BALANCE
+      // 🔍 We query the 'users' table to get the BALANCE and profile data
+      // ✅ FIX: Use .maybeSingle() instead of .single() to avoid JSON coercion crashes
       const { data: userProfile, error } = await supabase
         .from('users')
         .select('*')
         .eq('id', userId)
-        .single();
+        .maybeSingle(); 
 
-      if (error) {
-        console.error("Fetch Profile Error:", error.message);
+      // If there is an error or if the user record doesn't exist yet in the public table
+      if (error || !userProfile) {
+        if (error) console.error("Fetch Profile Database Error:", error.message);
+        
         // Fallback: If public profile is missing, return basic auth info (balance 0)
+        // This prevents the dashboard from crashing for new users.
         return res.status(200).json({
           status: 'success',
           data: {
@@ -44,12 +48,12 @@ class UserController {
       });
 
     } catch (error) {
-      console.error("Get Me Error:", error.message);
+      console.error("Get Me Controller Error:", error.message);
       res.status(500).json({ status: 'error', message: error.message });
     }
   }
 
-  // 2. Update Profile (Optional)
+  // 2. Update Profile
   async updateMe(req, res) {
     try {
       const { full_name } = req.body;
@@ -59,13 +63,14 @@ class UserController {
         .update({ full_name })
         .eq('id', req.user.id)
         .select()
-        .single();
+        .maybeSingle(); // ✅ Also changed here for consistency
 
       if (error) throw error;
 
       res.status(200).json({ status: 'success', data });
 
     } catch (error) {
+      console.error("Update Profile Error:", error.message);
       res.status(400).json({ status: 'error', message: error.message });
     }
   }

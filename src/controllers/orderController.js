@@ -1,13 +1,14 @@
 const supabase = require('../config/supabase');
-const sendEmail = require('../utils/emailService');
+const { sendEmail } = require('../utils/emailService');
 
 class OrderController {
 
   // Helper: Get localized price
   async _getLocalizedPrice(productId, plan, userId) {
     const { data: product } = await supabase.from('products').select('*').eq('id', productId).single();
-    const { data: user } = await supabase.from('users').select('currency').eq('id', userId).single();
-    if (!product || !user) throw new Error("Product or User not found");
+    const { data: user } = await supabase.from('users').select('currency').eq('id', userId).maybeSingle();
+    
+    if (!product || !user) throw new Error("Product or User record not found.");
 
     const currency = user.currency || 'USD';
     let price = 0;
@@ -48,7 +49,7 @@ class OrderController {
       }
 
       const { price, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
-      const { data: user } = await supabase.from('users').select('email, full_name').eq('id', userId).single();
+      const { data: user } = await supabase.from('users').select('email, full_name').eq('id', userId).maybeSingle();
 
       const { data: newOrder, error } = await supabase.from('orders').insert([{
           user_id: userId, product_id: productId, plan, price, payment_method: paymentMethod, transaction_id: transactionId, payment_screenshot_url: screenshotUrl, status: 'pending'
@@ -70,7 +71,7 @@ class OrderController {
     }
   }
 
-  // 2. Purchase with Wallet (Supports Promo Codes)
+  // 2. Purchase with Wallet
   async purchaseWithWallet(req, res) {
     try {
       console.log("\n⚡ STARTING WALLET PURCHASE...");
@@ -80,7 +81,6 @@ class OrderController {
       let { price, product } = await this._getLocalizedPrice(productId, plan, userId);
       let discountApplied = 0;
 
-      // 🏷️ 1. Validate & Apply Promo Code
       if (promoCode) {
         const { data: promo, error: promoError } = await supabase
           .from('promo_codes')
@@ -90,65 +90,53 @@ class OrderController {
           .single();
 
         if (promo) {
-          // Check Constraints
           const isExpired = promo.expires_at && new Date(promo.expires_at) < new Date();
           const isLimitReached = promo.max_uses !== null && promo.uses_count >= promo.max_uses;
 
-          if (isExpired) {
-             return res.status(400).json({ message: 'Promo code has expired.' });
-          }
-          if (isLimitReached) {
-             return res.status(400).json({ message: 'Promo code usage limit reached.' });
-          }
+          if (isExpired) return res.status(400).json({ message: 'Promo code has expired.' });
+          if (isLimitReached) return res.status(400).json({ message: 'Promo code usage limit reached.' });
 
-          // Apply Discount
           if (promo.type === 'percent') {
             discountApplied = (price * promo.value) / 100;
           } else {
             discountApplied = promo.value;
           }
           
-          // Ensure price doesn't go below 0
           price = Math.max(0, price - discountApplied);
 
-          // ✅ FIX: Increment Usage using Secure RPC (prevents RLS errors)
           const { error: rpcError } = await supabase.rpc('increment_promo_usage', { promo_code: promo.code });
           if (rpcError) {
              console.error("❌ Failed to increment promo usage:", rpcError);
-             // Fail safe: If RPC missing, try direct update (might fail due to RLS)
              await supabase.from('promo_codes').update({ uses_count: promo.uses_count + 1 }).eq('id', promo.id);
           }
-          
-          console.log(`✅ Promo Applied: ${promo.code} (-${discountApplied})`);
         }
       }
 
-      // 💰 2. Check Balance
-      const { data: user } = await supabase.from('users').select('balance, email, full_name').eq('id', userId).single();
+      const { data: user } = await supabase.from('users').select('balance, email, full_name').eq('id', userId).maybeSingle();
       
-      if (Number(user.balance) < price) {
+      if (!user || Number(user.balance) < price) {
         return res.status(400).json({ message: 'Insufficient wallet balance' });
       }
 
-      // 📦 3. Assign License
-      const { data: license, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+      const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
         p_product_id: productId, p_plan: plan, p_user_id: userId 
       });
 
-      if (rpcError || !license) {
+      // ✅ FIX: Safely handle both Object and Array results from RPC
+      const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+
+      if (rpcError || !license || !license.id) {
         return res.status(400).json({ message: `Out of Stock! No unused keys found for ${plan}.` });
       }
 
-      // 💳 4. Deduct Balance
       const newBalance = Number(user.balance) - price;
       await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
 
-      // 📝 5. Create Order Record
       const { data: order, error: orderError } = await supabase.from('orders').insert([{
           user_id: userId, 
           product_id: productId, 
           plan, 
-          price, // Final discounted price
+          price, 
           payment_method: 'wallet', 
           transaction_id: `WALLET-${Date.now()}`, 
           status: 'completed', 
@@ -157,7 +145,6 @@ class OrderController {
 
       if (orderError) throw orderError;
 
-      // 📧 6. Email User
       if (user.email) {
         await sendEmail(user.email, `✅ Order Confirmed: ${product.name}`, 
           `<h3>Thank you for your purchase!</h3><p>Price Paid: ${price}</p><p>Key: ${license.key}</p>`);
@@ -171,23 +158,124 @@ class OrderController {
     }
   }
 
-  // Getters
- // This is already in your code, keeping it here for verification
-async getMyOrders(req, res) {
-  try {
-    const { data, error } = await supabase
-      .from('orders')
-      // Selects ALL fields (*) including transaction_id, plus related data
-      .select(`*, products ( name, image_url, download_link, tutorial_video_link, activation_process ), licenses ( key, status )`)
-      .eq('user_id', req.user.id)
-      .order('created_at', { ascending: false });
+  // ✅ 3. CLAIM FREE TRIAL (Fully Optimized)
+  async claimTrial(req, res) {
+    try {
+        console.log("🎁 Claiming Free Trial...");
+        const { productId } = req.body;
+        const userId = req.user.id;
 
-    if (error) throw error;
-    res.status(200).json({ status: 'success', data });
-  } catch (error) { 
-    res.status(500).json({ status: 'error', message: error.message }); 
+        const { data: product } = await supabase.from('products').select('*').eq('id', productId).single();
+        if (!product || !product.is_trial) {
+            return res.status(400).json({ message: 'This product does not offer a free trial.' });
+        }
+
+        const { count, error: countError } = await supabase
+            .from('orders')
+            .select('*', { count: 'exact', head: true })
+            .eq('user_id', userId)
+            .eq('product_id', productId)
+            .eq('plan', 'trial'); 
+
+        if (countError) throw countError;
+        if (count > 0) {
+            return res.status(400).json({ message: 'You have already claimed a free trial for this product.' });
+        }
+
+        let requiredPlan = 'trial_1_day';
+        const hours = parseInt(product.trial_hours);
+        if (hours <= 24) requiredPlan = 'trial_1_day';
+        else if (hours <= 48) requiredPlan = 'trial_2_days';
+        else if (hours <= 72) requiredPlan = 'trial_3_days';
+        else requiredPlan = 'trial_1_day';
+
+        console.log(`🔍 Searching for Shared Stock: ${requiredPlan}`);
+
+        // ✅ FIX: Use string parameters for RPC to ensure match
+        const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+            p_product_id: productId.toString(), 
+            p_plan: requiredPlan, 
+            p_user_id: userId.toString() 
+        });
+
+        // ✅ FIX: Robust array check for license data
+        const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+
+        if (rpcError || !license || !license.id) {
+            console.error("❌ Stock Error:", rpcError || "No license returned from RPC");
+            return res.status(400).json({ 
+                status: 'error',
+                message: `Out of Stock! Please wait for admin to add more ${requiredPlan.replace(/_/g, ' ')} keys.` 
+            });
+        }
+
+        const { data: order, error: orderError } = await supabase.from('orders').insert([{
+            user_id: userId,
+            product_id: productId,
+            plan: 'trial', 
+            price: 0,
+            payment_method: 'free_trial',
+            transaction_id: `TRIAL-${Date.now()}`,
+            status: 'completed',
+            license_keys_id: license.id 
+        }]).select().single();
+
+        if (orderError) throw orderError;
+
+        const { data: userProfile } = await supabase.from('users').select('email').eq('id', userId).maybeSingle();
+        const finalEmail = userProfile?.email || req.user.email;
+
+        if (finalEmail) {
+            await sendEmail(finalEmail, `🎁 Free Trial Started: ${product.name}`, 
+                `<h3>Your Free Trial is Active!</h3>
+                 <p><strong>Duration:</strong> ${product.trial_hours} Hours</p>
+                 <p><strong>License Key:</strong> ${license.key}</p>`);
+        }
+
+        res.status(200).json({ status: 'success', data: order, message: 'Trial started successfully!' });
+
+    } catch (error) {
+        console.error("Trial Claim Error:", error.message);
+        res.status(500).json({ status: 'error', message: error.message });
+    }
   }
-}
+
+  // Getters
+ async getMyOrders(req, res) {
+    try {
+      const { data, error } = await supabase
+        .from('orders')
+        .select(`
+          *, 
+          products ( 
+            name, 
+            image_url, 
+            download_link, 
+            tutorial_video_link, 
+            activation_process 
+          ), 
+          licenses!orders_license_keys_id_fkey ( 
+            key, 
+            status 
+          )
+        `)
+        .eq('user_id', req.user.id)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      // ✅ Map the data so the frontend sees 'license.key' easily
+      const mappedData = data.map(order => ({
+        ...order,
+        license: order.licenses // Ensure frontend looks for 'license.key'
+      }));
+
+      res.status(200).json({ status: 'success', data: mappedData });
+    } catch (error) { 
+      console.error("Get Orders Error:", error.message);
+      res.status(500).json({ status: 'error', message: error.message }); 
+    }
+  }
 
   async getAllOrders(req, res) {
     try {
@@ -209,10 +297,13 @@ async getMyOrders(req, res) {
       }
 
       if (status === 'completed') {
-        const { data: license, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+        const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
            p_product_id: currentOrder.product_id, p_plan: currentOrder.plan, p_user_id: currentOrder.user_id 
         });
-        if (!license || rpcError) return res.status(400).json({ status: 'error', message: "Out of Stock" });
+
+        const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+
+        if (!license || !license.id || rpcError) return res.status(400).json({ status: 'error', message: "Out of Stock" });
 
         const { data: updatedOrder } = await supabase.from('orders').update({ status: 'completed', license_keys_id: license.id }).eq('id', id).select().single();
         
@@ -228,6 +319,7 @@ async getMyOrders(req, res) {
 const controller = new OrderController();
 controller.createOrder = controller.createOrder.bind(controller);
 controller.purchaseWithWallet = controller.purchaseWithWallet.bind(controller);
+controller.claimTrial = controller.claimTrial.bind(controller);
 controller.updateStatus = controller.updateStatus.bind(controller);
 
 module.exports = controller;

@@ -16,6 +16,7 @@ class AuthService {
       if (authError) throw authError;
 
       // 2. Upsert into public table
+      // ✅ FIX: Use .maybeSingle() to handle the return safely
       const { data: userData, error: dbError } = await supabase
         .from('users')
         .upsert([{
@@ -27,7 +28,7 @@ class AuthService {
           currency: 'USD'
         }])
         .select()
-        .single();
+        .maybeSingle(); 
 
       if (dbError) {
         await supabase.auth.admin.deleteUser(authData.user.id); // Rollback
@@ -51,24 +52,26 @@ class AuthService {
 
     if (error) throw new Error('Invalid login credentials');
 
-    // 2. Fetch Profile
+    // 2. Fetch Profile from public.users table
+    // ✅ FIX: Use .maybeSingle() to prevent "coerce to single JSON object" error
+    // if the profile is missing or found multiple times.
     const { data: userProfile } = await supabase
       .from('users')
       .select('*')
       .eq('id', data.user.id)
-      .single();
+      .maybeSingle(); 
 
     // 3. Return Data (Aligned with Frontend)
     return {
       user: {
         id: data.user.id,
         email: data.user.email,
-        name: userProfile?.full_name || data.user.user_metadata.full_name,
+        name: userProfile?.full_name || data.user.user_metadata.full_name || 'User',
         role: userProfile?.role || 'user',
-        balance: userProfile?.balance || 0,
+        balance: parseFloat(userProfile?.balance) || 0,
         currency: userProfile?.currency || 'USD'
       },
-      // ✅ FIX: Variable name is 'token'
+      // ✅ Variable name matches your Frontend expectations
       token: data.session.access_token, 
       refreshToken: data.session.refresh_token
     };

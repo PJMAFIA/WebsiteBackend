@@ -26,7 +26,9 @@ class ProductController {
       const { 
         name, description, price_1_day, price_7_days, price_30_days, 
         price_lifetime, download_link, tutorial_video_link, activation_process,
-        currency_prices // ✅ Received as String from FormData
+        currency_prices, // ✅ Received as String from FormData
+        is_trial, // ✅ NEW: Trial Flag
+        trial_hours // ✅ NEW: Trial Duration
       } = req.body;
 
       const files = req.files || []; 
@@ -85,7 +87,11 @@ class ProductController {
 
           download_link, 
           tutorial_video_link, 
-          activation_process
+          activation_process,
+
+          // ✅ NEW: Save Trial Data
+          is_trial: is_trial === 'true' || is_trial === true,
+          trial_hours: parseInt(trial_hours || 0)
         }])
         .select()
         .single();
@@ -109,7 +115,9 @@ class ProductController {
         name, description, price_1_day, price_7_days, price_30_days, 
         price_lifetime, download_link, tutorial_video_link, activation_process,
         existing_images, 
-        currency_prices // ✅ Received as String
+        currency_prices, // ✅ Received as String
+        is_trial, // ✅ NEW
+        trial_hours // ✅ NEW
       } = req.body;
 
       const files = req.files || [];
@@ -171,7 +179,11 @@ class ProductController {
 
           download_link, 
           tutorial_video_link, 
-          activation_process
+          activation_process,
+
+          // ✅ NEW: Update Trial Data
+          is_trial: is_trial === 'true' || is_trial === true,
+          trial_hours: parseInt(trial_hours || 0)
         })
         .eq('id', id)
         .select()

@@ -14,20 +14,26 @@ router.post(
   orderController.createOrder
 );
 
-// 🔥 2. Wallet Purchase (Instant - NEW ROUTE)
-// This fixes the 404 Error. It MUST be defined before /:id routes
+// 2. Wallet Purchase (Instant)
 router.post(
   '/wallet', 
   protect, 
   orderController.purchaseWithWallet
 );
 
-// 3. Get My Orders
+// ✅ 3. NEW: Claim Free Trial (Fixes the 404 Error)
+router.post(
+  '/claim-trial',
+  protect,
+  orderController.claimTrial
+);
+
+// 4. Get My Orders
 router.get('/my-orders', protect, orderController.getMyOrders);
 
 // --- Admin Routes ---
 
-// 4. Get All Orders
+// 5. Get All Orders
 router.get(
   '/admin/all', 
   protect, 
@@ -35,7 +41,7 @@ router.get(
   orderController.getAllOrders
 );
 
-// 5. Approve/Reject Order
+// 6. Approve/Reject Order
 router.patch(
   '/:id/status', 
   protect, 

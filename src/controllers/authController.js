@@ -1,7 +1,7 @@
 const authService = require('../services/authService');
 const { registerSchema, loginSchema } = require('../utils/validators');
 const supabase = require('../config/supabase');
-const sendEmail = require('../utils/emailService');
+const { sendEmail } = require('../utils/emailService'); // ✅ Ensure destructured import if needed
 
 // Helper: Generate 6-digit code
 const generateCode = () => Math.floor(100000 + Math.random() * 900000).toString();
@@ -15,14 +15,19 @@ exports.sendVerificationCode = async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'All fields are required' });
     }
 
-    // 1. Check if user exists in PUBLIC 'users' table (Real Account)
-    const { data: dbUser } = await supabase.from('users').select('id').eq('email', email).single();
+    // 1. Check if user exists in PUBLIC 'users' table
+    // ✅ FIX: Use .maybeSingle() so it doesn't crash when the user ISN'T found
+    const { data: dbUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle(); 
+
     if (dbUser) {
       return res.status(400).json({ status: 'error', message: 'Email already registered' });
     }
 
     // 2. 🔥 ZOMBIE CHECK: Check if user exists in SUPABASE AUTH (Ghost Account)
-    // If they verify their email but didn't finish registration previously, they might exist here.
     const { data: authData, error: listError } = await supabase.auth.admin.listUsers();
     
     if (!listError && authData?.users) {
@@ -75,12 +80,13 @@ exports.verifyAndRegister = async (req, res) => {
     if (!code) return res.status(400).json({ status: 'error', message: 'Verification code is required' });
 
     // 1. Verify Code
+    // ✅ FIX: Use .maybeSingle() here as well
     const { data: record } = await supabase
       .from('verification_codes')
       .select('*')
       .eq('email', email)
       .eq('code', code)
-      .single();
+      .maybeSingle();
 
     if (!record) {
       return res.status(400).json({ status: 'error', message: 'Invalid verification code' });
@@ -111,7 +117,6 @@ exports.verifyAndRegister = async (req, res) => {
 
   } catch (error) {
     console.error("Verify Register Error:", error);
-    // If it's the duplicate error, it means the race condition happened or cleanup failed
     if (error.message.includes('already been registered')) {
         return res.status(400).json({ status: 'error', message: 'User already exists. Please login.' });
     }
@@ -119,7 +124,7 @@ exports.verifyAndRegister = async (req, res) => {
   }
 };
 
-// Login (Unchanged)
+// Login 
 exports.login = async (req, res) => {
   try {
     const validatedData = loginSchema.parse(req.body);
