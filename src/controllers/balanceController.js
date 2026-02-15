@@ -1,13 +1,42 @@
 const balanceService = require('../services/balanceService');
-// ✅ FIX: Destructured Import (Matches the Service Export)
 const { sendEmail } = require('../utils/emailService'); 
 const supabase = require('../config/supabase');
 
 // 1. Create Request (User submits -> Notify Admin)
 exports.createRequest = async (req, res) => {
   try {
+    const userId = req.user.id; // From Auth Token
+
+    // 🔍 SELF-HEALING FIX: Ensure user exists in 'public.users' before linking
+    // This prevents the "violates foreign key constraint" error.
+    const { data: existingUser } = await supabase
+        .from('users')
+        .select('id')
+        .eq('id', userId)
+        .maybeSingle();
+
+    if (!existingUser) {
+        console.log(`⚠️ User ${userId} missing from public table. Auto-creating...`);
+        
+        // Upsert the user to satisfy the Foreign Key
+        const { error: upsertError } = await supabase.from('users').upsert({
+            id: userId,
+            email: req.user.email,
+            full_name: req.user.user_metadata?.full_name || 'User',
+            role: 'user',
+            balance: 0,
+            currency: 'USD'
+        });
+
+        if (upsertError) {
+            console.error("❌ Failed to auto-create user:", upsertError);
+            return res.status(500).json({ status: 'error', message: 'User profile sync failed. Please contact support.' });
+        }
+    }
+
+    // Now proceed with creating the request
     const requestData = {
-      userId: req.user.id,
+      userId: userId,
       amount: parseFloat(req.body.amount),
       currency: req.body.currency || 'USD',
       paymentMethod: req.body.paymentMethod,
@@ -26,7 +55,6 @@ exports.createRequest = async (req, res) => {
     // 📧 EMAIL TO ADMIN
     if (process.env.ADMIN_EMAIL) {
       console.log(`📨 Admin Alert: New Balance Request -> ${process.env.ADMIN_EMAIL}`);
-      // ✅ Now 'sendEmail' is correctly defined as a function
       await sendEmail(
         process.env.ADMIN_EMAIL,
         '💰 New Balance Request Pending',
