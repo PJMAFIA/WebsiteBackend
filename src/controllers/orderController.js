@@ -122,7 +122,6 @@ class OrderController {
         p_product_id: productId, p_plan: plan, p_user_id: userId 
       });
 
-      // ✅ FIX: Safely handle both Object and Array results from RPC
       const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
 
       if (rpcError || !license || !license.id) {
@@ -158,7 +157,7 @@ class OrderController {
     }
   }
 
-  // ✅ 3. CLAIM FREE TRIAL (Fully Optimized)
+  // 3. CLAIM FREE TRIAL
   async claimTrial(req, res) {
     try {
         console.log("🎁 Claiming Free Trial...");
@@ -189,20 +188,15 @@ class OrderController {
         else if (hours <= 72) requiredPlan = 'trial_3_days';
         else requiredPlan = 'trial_1_day';
 
-        console.log(`🔍 Searching for Shared Stock: ${requiredPlan}`);
-
-        // ✅ FIX: Use string parameters for RPC to ensure match
         const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
             p_product_id: productId.toString(), 
             p_plan: requiredPlan, 
             p_user_id: userId.toString() 
         });
 
-        // ✅ FIX: Robust array check for license data
         const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
 
         if (rpcError || !license || !license.id) {
-            console.error("❌ Stock Error:", rpcError || "No license returned from RPC");
             return res.status(400).json({ 
                 status: 'error',
                 message: `Out of Stock! Please wait for admin to add more ${requiredPlan.replace(/_/g, ' ')} keys.` 
@@ -240,22 +234,21 @@ class OrderController {
     }
   }
 
-  // Getters
- // Getters: Updated to properly fetch the license key string
+  // ✅ FIXED: Get My Orders (Forces Foreign Key Join)
   async getMyOrders(req, res) {
     try {
       const { data, error } = await supabase
         .from('orders')
         .select(`
           *, 
-          products ( 
+          products!orders_product_id_fkey ( 
             name, 
             image_url, 
             download_link, 
             tutorial_video_link, 
             activation_process 
           ), 
-          licenses!orders_license_keys_id_fkey ( 
+          license_obj:licenses!orders_license_keys_id_fkey ( 
             key, 
             status 
           )
@@ -265,10 +258,9 @@ class OrderController {
 
       if (error) throw error;
 
-      // ✅ Map the data so the frontend sees 'license.key' easily
       const mappedData = data.map(order => ({
         ...order,
-        license: order.licenses // Ensure frontend looks for 'license.key'
+        extracted_license_key: order.license_obj?.key || null 
       }));
 
       res.status(200).json({ status: 'success', data: mappedData });
@@ -278,19 +270,46 @@ class OrderController {
     }
   }
 
+  // ✅ FIXED: Admin Get All Orders (Forces Foreign Key Join)
+ // ✅ PERMANENT FIX: Manual Data Stitching (Bypasses Schema Cache Error)
   async getAllOrders(req, res) {
     try {
-      const { data, error } = await supabase.from('orders').select(`*, users(email, full_name), products(name)`).order('created_at', { ascending: false });
-      if (error) throw error;
-      res.status(200).json({ status: 'success', data });
-    } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
+      // 1. Fetch all orders
+      const { data: orders, error: orderError } = await supabase
+        .from('orders')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (orderError) throw orderError;
+
+      // 2. Fetch all users and products to map them manually
+      const { data: users } = await supabase.from('users').select('id, email, full_name, currency');
+      const { data: products } = await supabase.from('products').select('id, name');
+
+      // 3. Combine the data in memory
+      const mappedData = orders.map(order => {
+        const userMatch = users?.find(u => u.id === order.user_id);
+        const productMatch = products?.find(p => p.id === order.product_id);
+        
+        return {
+          ...order,
+          users: userMatch || { full_name: 'Unknown User', email: 'N/A' },
+          products: productMatch || { name: 'Deleted Product' }
+        };
+      });
+
+      res.status(200).json({ status: 'success', data: mappedData });
+    } catch (error) { 
+      console.error("Admin Manual Join Error:", error.message);
+      res.status(500).json({ status: 'error', message: error.message }); 
+    }
   }
 
   // Update Status
   async updateStatus(req, res) {
     try {
       const { id } = req.params; const { status } = req.body; 
-      const { data: currentOrder } = await supabase.from('orders').select('*, users!inner(email), products(name)').eq('id', id).single();
+      const { data: currentOrder } = await supabase.from('orders').select('*, users!orders_user_id_fkey(email), products!orders_product_id_fkey(name)').eq('id', id).single();
 
       if (status === 'rejected') {
         const { data } = await supabase.from('orders').update({ status: 'rejected' }).eq('id', id).select().single();
