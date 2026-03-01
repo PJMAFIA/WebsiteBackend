@@ -21,19 +21,26 @@ router.post(
   orderController.purchaseWithWallet
 );
 
-// ✅ 3. NEW: Claim Free Trial (Fixes the 404 Error)
+// 3. Claim Free Trial
 router.post(
   '/claim-trial',
   protect,
   orderController.claimTrial
 );
 
-// 4. Get My Orders
+// 4. Submit UID for Bypass Emulator
+router.post(
+  '/submit-uid',
+  protect,
+  orderController.submitUID
+);
+
+// 5. Get My Orders
 router.get('/my-orders', protect, orderController.getMyOrders);
 
 // --- Admin Routes ---
 
-// 5. Get All Orders
+// 6. Get All Orders
 router.get(
   '/admin/all', 
   protect, 
@@ -41,12 +48,20 @@ router.get(
   orderController.getAllOrders
 );
 
-// 6. Approve/Reject Order
+// 7. Approve/Reject Order
 router.patch(
   '/:id/status', 
   protect, 
   adminOnly, 
   orderController.updateStatus
+);
+
+// ✅ NEW: Admin Handle Submitted UID
+router.post(
+  '/admin/handle-uid',
+  protect,
+  adminOnly,
+  orderController.adminHandleUID
 );
 
 module.exports = router;

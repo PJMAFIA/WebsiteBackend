@@ -30,7 +30,6 @@ class OrderController {
   // 1. Create Order (Manual)
   async createOrder(req, res) {
     try {
-      console.log("📥 Creating Order (Manual)...");
       const { productId, plan, paymentMethod, transactionId } = req.body;
       const userId = req.user.id;
       const file = req.file;
@@ -58,7 +57,6 @@ class OrderController {
       if (error) throw error;
 
       if (process.env.ADMIN_EMAIL) {
-        console.log(`📨 Admin Alert: New Order Pending -> ${process.env.ADMIN_EMAIL}`);
         await sendEmail(process.env.ADMIN_EMAIL, `🛒 New Order Pending: ${product.name}`, 
           `<h3>New Manual Order</h3><p>User: ${user?.full_name}</p><p>Price: ${currency} ${price}</p>`);
       }
@@ -74,7 +72,6 @@ class OrderController {
   // 2. Purchase with Wallet
   async purchaseWithWallet(req, res) {
     try {
-      console.log("\n⚡ STARTING WALLET PURCHASE...");
       const { productId, plan, promoCode } = req.body;
       const userId = req.user.id;
 
@@ -106,7 +103,6 @@ class OrderController {
 
           const { error: rpcError } = await supabase.rpc('increment_promo_usage', { promo_code: promo.code });
           if (rpcError) {
-             console.error("❌ Failed to increment promo usage:", rpcError);
              await supabase.from('promo_codes').update({ uses_count: promo.uses_count + 1 }).eq('id', promo.id);
           }
         }
@@ -118,14 +114,23 @@ class OrderController {
         return res.status(400).json({ message: 'Insufficient wallet balance' });
       }
 
-      const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
-        p_product_id: productId, p_plan: plan, p_user_id: userId 
-      });
+      let licenseId = null;
+      let licenseKey = null;
 
-      const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+      if (product.name === 'Bypass Emulator') {
+        licenseKey = "PENDING_UID_ACTIVATION";
+      } else {
+        const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+          p_product_id: productId, p_plan: plan, p_user_id: userId 
+        });
 
-      if (rpcError || !license || !license.id) {
-        return res.status(400).json({ message: `Out of Stock! No unused keys found for ${plan}.` });
+        const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+
+        if (rpcError || !license || !license.id) {
+          return res.status(400).json({ message: `Out of Stock! No unused keys found for ${plan}.` });
+        }
+        licenseId = license.id;
+        licenseKey = license.key;
       }
 
       const newBalance = Number(user.balance) - price;
@@ -139,20 +144,22 @@ class OrderController {
           payment_method: 'wallet', 
           transaction_id: `WALLET-${Date.now()}`, 
           status: 'completed', 
-          license_keys_id: license.id
+          license_keys_id: licenseId
         }]).select().single();
 
       if (orderError) throw orderError;
 
-      if (user.email) {
+      if (user.email && licenseKey !== "PENDING_UID_ACTIVATION") {
         await sendEmail(user.email, `✅ Order Confirmed: ${product.name}`, 
-          `<h3>Thank you for your purchase!</h3><p>Price Paid: ${price}</p><p>Key: ${license.key}</p>`);
+          `<h3>Thank you for your purchase!</h3><p>Price Paid: ${price}</p><p>Key: ${licenseKey}</p>`);
+      } else if (user.email) {
+        await sendEmail(user.email, `✅ Order Confirmed: ${product.name}`, 
+          `<h3>Thank you for your purchase!</h3><p>Please check your dashboard to submit your UID.</p>`);
       }
 
       res.status(200).json({ status: 'success', data: order });
 
     } catch (error) {
-      console.error("Wallet Purchase Error:", error.message);
       res.status(500).json({ status: 'error', message: error.message });
     }
   }
@@ -160,7 +167,6 @@ class OrderController {
   // 3. CLAIM FREE TRIAL
   async claimTrial(req, res) {
     try {
-        console.log("🎁 Claiming Free Trial...");
         const { productId } = req.body;
         const userId = req.user.id;
 
@@ -188,19 +194,28 @@ class OrderController {
         else if (hours <= 72) requiredPlan = 'trial_3_days';
         else requiredPlan = 'trial_1_day';
 
-        const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
-            p_product_id: productId.toString(), 
-            p_plan: requiredPlan, 
-            p_user_id: userId.toString() 
-        });
+        let licenseId = null;
+        let licenseKey = null;
 
-        const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
-
-        if (rpcError || !license || !license.id) {
-            return res.status(400).json({ 
-                status: 'error',
-                message: `Out of Stock! Please wait for admin to add more ${requiredPlan.replace(/_/g, ' ')} keys.` 
+        if (product.name === 'Bypass Emulator') {
+           licenseKey = "PENDING_UID_ACTIVATION";
+        } else {
+            const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+                p_product_id: productId.toString(), 
+                p_plan: requiredPlan, 
+                p_user_id: userId.toString() 
             });
+
+            const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+
+            if (rpcError || !license || !license.id) {
+                return res.status(400).json({ 
+                    status: 'error',
+                    message: `Out of Stock! Please wait for admin to add more ${requiredPlan.replace(/_/g, ' ')} keys.` 
+                });
+            }
+            licenseId = license.id;
+            licenseKey = license.key;
         }
 
         const { data: order, error: orderError } = await supabase.from('orders').insert([{
@@ -211,7 +226,7 @@ class OrderController {
             payment_method: 'free_trial',
             transaction_id: `TRIAL-${Date.now()}`,
             status: 'completed',
-            license_keys_id: license.id 
+            license_keys_id: licenseId 
         }]).select().single();
 
         if (orderError) throw orderError;
@@ -219,22 +234,20 @@ class OrderController {
         const { data: userProfile } = await supabase.from('users').select('email').eq('id', userId).maybeSingle();
         const finalEmail = userProfile?.email || req.user.email;
 
-        if (finalEmail) {
+        if (finalEmail && licenseKey !== "PENDING_UID_ACTIVATION") {
             await sendEmail(finalEmail, `🎁 Free Trial Started: ${product.name}`, 
                 `<h3>Your Free Trial is Active!</h3>
                  <p><strong>Duration:</strong> ${product.trial_hours} Hours</p>
-                 <p><strong>License Key:</strong> ${license.key}</p>`);
+                 <p><strong>License Key:</strong> ${licenseKey}</p>`);
         }
 
         res.status(200).json({ status: 'success', data: order, message: 'Trial started successfully!' });
 
     } catch (error) {
-        console.error("Trial Claim Error:", error.message);
         res.status(500).json({ status: 'error', message: error.message });
     }
   }
 
-  // ✅ FIXED: Get My Orders (Forces Foreign Key Join)
   async getMyOrders(req, res) {
     try {
       const { data, error } = await supabase
@@ -265,16 +278,12 @@ class OrderController {
 
       res.status(200).json({ status: 'success', data: mappedData });
     } catch (error) { 
-      console.error("Get Orders Error:", error.message);
       res.status(500).json({ status: 'error', message: error.message }); 
     }
   }
 
-  // ✅ FIXED: Admin Get All Orders (Forces Foreign Key Join)
- // ✅ PERMANENT FIX: Manual Data Stitching (Bypasses Schema Cache Error)
   async getAllOrders(req, res) {
     try {
-      // 1. Fetch all orders
       const { data: orders, error: orderError } = await supabase
         .from('orders')
         .select('*')
@@ -282,11 +291,9 @@ class OrderController {
 
       if (orderError) throw orderError;
 
-      // 2. Fetch all users and products to map them manually
       const { data: users } = await supabase.from('users').select('id, email, full_name, currency');
       const { data: products } = await supabase.from('products').select('id, name');
 
-      // 3. Combine the data in memory
       const mappedData = orders.map(order => {
         const userMatch = users?.find(u => u.id === order.user_id);
         const productMatch = products?.find(p => p.id === order.product_id);
@@ -300,16 +307,22 @@ class OrderController {
 
       res.status(200).json({ status: 'success', data: mappedData });
     } catch (error) { 
-      console.error("Admin Manual Join Error:", error.message);
       res.status(500).json({ status: 'error', message: error.message }); 
     }
   }
 
-  // Update Status
   async updateStatus(req, res) {
     try {
       const { id } = req.params; const { status } = req.body; 
-      const { data: currentOrder } = await supabase.from('orders').select('*, users!orders_user_id_fkey(email), products!orders_product_id_fkey(name)').eq('id', id).single();
+      
+      const { data: currentOrder } = await supabase.from('orders').select('*').eq('id', id).single();
+      if (!currentOrder) return res.status(404).json({ message: "Order not found" });
+
+      const { data: orderUser } = await supabase.from('users').select('email').eq('id', currentOrder.user_id).single();
+      const { data: orderProduct } = await supabase.from('products').select('name').eq('id', currentOrder.product_id).single();
+
+      const userEmail = orderUser?.email;
+      const productName = orderProduct?.name || 'Software';
 
       if (status === 'rejected') {
         const { data } = await supabase.from('orders').update({ status: 'rejected' }).eq('id', id).select().single();
@@ -317,22 +330,140 @@ class OrderController {
       }
 
       if (status === 'completed') {
-        const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
-           p_product_id: currentOrder.product_id, p_plan: currentOrder.plan, p_user_id: currentOrder.user_id 
-        });
+        let licenseId = null;
+        let licenseKey = null;
 
-        const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+        if (productName === 'Bypass Emulator') {
+            licenseKey = "PENDING_UID_ACTIVATION";
+        } else {
+            const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+               p_product_id: currentOrder.product_id, p_plan: currentOrder.plan, p_user_id: currentOrder.user_id 
+            });
 
-        if (!license || !license.id || rpcError) return res.status(400).json({ status: 'error', message: "Out of Stock" });
+            const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
 
-        const { data: updatedOrder } = await supabase.from('orders').update({ status: 'completed', license_keys_id: license.id }).eq('id', id).select().single();
-        
-        if (currentOrder.users?.email) {
-          await sendEmail(currentOrder.users.email, `✅ Order Approved: ${currentOrder.products?.name}`, `<h3>Key:</h3><p>${license.key}</p>`);
+            if (!license || !license.id || rpcError) return res.status(400).json({ status: 'error', message: "Out of Stock" });
+            
+            licenseId = license.id;
+            licenseKey = license.key;
         }
+
+        const { data: updatedOrder } = await supabase.from('orders').update({ status: 'completed', license_keys_id: licenseId }).eq('id', id).select().single();
+        
+        if (userEmail && licenseKey !== "PENDING_UID_ACTIVATION") {
+          await sendEmail(userEmail, `✅ Order Approved: ${productName}`, `<h3>Key:</h3><p>${licenseKey}</p>`);
+        } else if (userEmail) {
+          await sendEmail(userEmail, `✅ Order Approved: ${productName}`, `<h3>Your order is active!</h3><p>Please check your dashboard to submit your UID.</p>`);
+        }
+        
         return res.status(200).json({ status: 'success', data: updatedOrder });
       }
     } catch (error) { res.status(400).json({ status: 'error', message: error.message }); }
+  }
+
+  // ✅ FIXED: Bulletproof UID Submit (Ensures DB saves properly)
+  async submitUID(req, res) {
+      try {
+          const { orderId, uid } = req.body;
+          const userId = req.user.id;
+
+          const { data: order } = await supabase.from('orders').select('*').eq('id', orderId).eq('user_id', userId).single();
+          if (!order) return res.status(404).json({ message: "Order not found" });
+
+          const { data: user } = await supabase.from('users').select('email, full_name').eq('id', userId).single();
+
+          let newTransactionId = order.transaction_id || '';
+          
+          if (!newTransactionId.includes('UID:')) {
+              newTransactionId = newTransactionId ? `${newTransactionId} || UID: ${uid}` : `UID: ${uid}`;
+              
+              // Enforce update verification
+              const { data: updated, error: updateError } = await supabase
+                  .from('orders')
+                  .update({ transaction_id: newTransactionId })
+                  .eq('id', orderId)
+                  .select()
+                  .single();
+
+              if (updateError) throw updateError;
+              
+              // If RLS blocked the update, tell the frontend
+              if (!updated) {
+                  return res.status(403).json({ message: "Database block. Check Supabase RLS 'UPDATE' policies on the orders table." });
+              }
+          }
+
+          if (process.env.ADMIN_EMAIL) {
+            await sendEmail(
+                process.env.ADMIN_EMAIL, 
+                `⚠️ New UID Submission: Bypass Emulator`, 
+                `<h3>New UID Submitted for Activation</h3>
+                 <p><strong>User:</strong> ${user?.full_name} (${user?.email})</p>
+                 <p><strong>Order ID:</strong> ${orderId}</p>
+                 <p><strong>Submitted UID:</strong> ${uid}</p>`
+            );
+          }
+
+          return res.status(200).json({ status: 'success', message: 'UID submitted to admin successfully.' });
+      } catch (error) {
+          console.error("Submit UID Error:", error);
+          res.status(500).json({ status: 'error', message: 'Failed to submit UID' });
+      }
+  }
+
+  // ✅ FIXED: Admin Accept/Reject logic with regex cleanup
+  async adminHandleUID(req, res) {
+      try {
+          const { orderId, action } = req.body; 
+          
+          const { data: order } = await supabase.from('orders').select('*').eq('id', orderId).single();
+          if (!order) return res.status(404).json({ message: "Order not found" });
+
+          const { data: user } = await supabase.from('users').select('email').eq('id', order.user_id).single();
+          const { data: product } = await supabase.from('products').select('name').eq('id', order.product_id).single();
+
+          const userEmail = user?.email;
+          const productName = product?.name || 'Bypass Emulator';
+
+          let originalTransactionId = order.transaction_id || '';
+
+          if (action === 'accept') {
+              const updatedTransactionId = originalTransactionId.replace('UID:', 'UID_VERIFIED:');
+              await supabase.from('orders').update({ transaction_id: updatedTransactionId }).eq('id', orderId);
+
+              if (userEmail) {
+                  await sendEmail(
+                      userEmail, 
+                      `🚀 UID Activated: ${productName}`, 
+                      `<h3>Your Software is ready!</h3><p>Admin has successfully activated your UID. You may now use the software.</p>`
+                  );
+              }
+              return res.status(200).json({ status: 'success', message: 'UID accepted and user notified.' });
+
+          } else if (action === 'reject') {
+              // Properly strips the UID out completely so the input box comes back
+              if (originalTransactionId.includes('|| UID:')) {
+                  originalTransactionId = originalTransactionId.split('|| UID:')[0].trim();
+              } else {
+                  originalTransactionId = originalTransactionId.replace(/UID_VERIFIED:.*|UID:.*/, '').trim();
+              }
+
+              await supabase.from('orders').update({ transaction_id: originalTransactionId }).eq('id', orderId);
+
+              if (userEmail) {
+                  await sendEmail(
+                      userEmail, 
+                      `❌ UID Rejected: ${productName}`, 
+                      `<h3>Action Required</h3><p>Admin has rejected your submitted UID. Please check your dashboard and submit a correct UID.</p>`
+                  );
+              }
+              return res.status(200).json({ status: 'success', message: 'UID rejected and cleared.' });
+          }
+
+      } catch (error) {
+          console.error("Admin UID Handle Error:", error);
+          res.status(500).json({ status: 'error', message: 'Failed to process UID.' });
+      }
   }
 }
 
@@ -341,5 +472,7 @@ controller.createOrder = controller.createOrder.bind(controller);
 controller.purchaseWithWallet = controller.purchaseWithWallet.bind(controller);
 controller.claimTrial = controller.claimTrial.bind(controller);
 controller.updateStatus = controller.updateStatus.bind(controller);
+controller.submitUID = controller.submitUID.bind(controller);
+controller.adminHandleUID = controller.adminHandleUID.bind(controller);
 
 module.exports = controller;
