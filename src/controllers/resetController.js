@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const sendEmail = require('../utils/emailService');
+const { sendDiscordWebhook } = require('../utils/discordService'); // ✅ IMPORTED DISCORD SERVICE
 
 class ResetController {
   
@@ -24,6 +25,10 @@ class ResetController {
 
       if (!order) return res.status(403).json({ status: 'error', message: 'Order not found' });
 
+      // Get Product Name and User Email for notifications
+      const { data: product } = await supabase.from('products').select('name').eq('id', productId).maybeSingle();
+      const { data: user } = await supabase.from('users').select('email, full_name').eq('id', userId).maybeSingle();
+
       // Insert Request
       const { data, error } = await supabase
         .from('credential_requests')
@@ -40,7 +45,7 @@ class ResetController {
 
       if (error) throw error;
 
-      // Notify Admin
+      // Notify Admin Email
       if (process.env.ADMIN_EMAIL) {
         try {
             await sendEmail(
@@ -48,10 +53,22 @@ class ResetController {
               '🔐 New Credential Reset Request',
               `<h3>User requested a reset</h3><p>User ID: ${userId}</p><p>Check Admin Dashboard.</p>`
             );
-        } catch (emailErr) {
-            console.error("⚠️ Failed to send Admin Alert:", emailErr.message);
-        }
+        } catch (emailErr) { console.error("⚠️ Failed to send Admin Alert:", emailErr.message); }
       }
+
+      // ✅ DISCORD WEBHOOK: HWID/Credential Reset Request
+      await sendDiscordWebhook([{
+        title: "🔐 New Reset Request (HWID/Creds)",
+        description: "A user is requesting a credentials or HWID reset for their software.",
+        color: 15158332, // Red/Pink
+        fields: [
+          { name: "User", value: `${user?.full_name || 'Unknown'} (${user?.email || 'N/A'})`, inline: false },
+          { name: "Product", value: product?.name || 'Unknown Product', inline: true },
+          { name: "Order ID", value: `\`${orderId}\``, inline: true }
+        ],
+        footer: { text: "Review and process in the Admin Reset panel" },
+        timestamp: new Date().toISOString()
+      }]);
 
       res.status(201).json({ status: 'success', data });
 
@@ -64,34 +81,19 @@ class ResetController {
   // 2. Get All Requests (Admin)
   async getAllRequests(req, res) {
     try {
-      const { data, error } = await supabase
-        .from('credential_requests')
-        .select('*, users(email, full_name), products(name)')
-        .order('created_at', { ascending: false });
-
+      const { data, error } = await supabase.from('credential_requests').select('*, users(email, full_name), products(name)').order('created_at', { ascending: false });
       if (error) throw error;
       res.status(200).json({ status: 'success', data });
-    } catch (error) {
-      console.error("❌ Get All Requests Error:", error);
-      res.status(500).json({ status: 'error', message: error.message });
-    }
+    } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
   }
 
   // 3. Get My Requests (User)
   async getMyRequests(req, res) {
     try {
-      const { data, error } = await supabase
-        .from('credential_requests')
-        .select('*, products(name)')
-        .eq('user_id', req.user.id)
-        .order('created_at', { ascending: false });
-
+      const { data, error } = await supabase.from('credential_requests').select('*, products(name)').eq('user_id', req.user.id).order('created_at', { ascending: false });
       if (error) throw error;
       res.status(200).json({ status: 'success', data });
-    } catch (error) {
-      console.error("❌ Get My Requests Error:", error);
-      res.status(500).json({ status: 'error', message: error.message });
-    }
+    } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
   }
 
   // 4. Update Status (Admin)
@@ -100,43 +102,25 @@ class ResetController {
       const { id } = req.params;
       const { status, adminResponse } = req.body; 
 
-      console.log(`🔄 Updating Request ${id} to ${status}...`);
-
-      // 1. Perform Update
       const { data: updated, error } = await supabase
         .from('credential_requests')
-        .update({ 
-            status, 
-            admin_response: adminResponse, 
-            updated_at: new Date() 
-        })
+        .update({ status, admin_response: adminResponse, updated_at: new Date() })
         .eq('id', id)
-        .select('*, users(email)') // Fetch user email
+        .select('*, users(email)') 
         .single();
 
       if (error) throw error;
 
-      // 2. Notify User
-      // 🚨 CHECK TERMINAL: This log shows EXACTLY who gets the email
       if (updated.users?.email) {
-        console.log(`📧 Sending notification to USER EMAIL: ${updated.users.email}`);
-        
         const subject = status === 'approved' ? '✅ Credentials Reset Approved' : '❌ Request Rejected';
         const body = status === 'approved' 
           ? `<p>Your credential reset request has been approved.</p><p><strong>Admin Note:</strong> ${adminResponse || 'Done.'}</p>`
           : `<p>Your request was rejected.</p><p>Reason: ${adminResponse || 'No reason provided.'}</p>`;
-        
         await sendEmail(updated.users.email, subject, body);
-      } else {
-        console.warn("⚠️ No user email found in database for this request.");
       }
 
       res.status(200).json({ status: 'success', data: updated });
-
-    } catch (error) {
-      console.error("🔥 Update Status Error:", error);
-      res.status(500).json({ status: 'error', message: error.message });
-    }
+    } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
   }
 }
 

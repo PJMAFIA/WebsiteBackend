@@ -1,5 +1,6 @@
 const supabase = require('../config/supabase');
 const { sendEmail } = require('../utils/emailService');
+const { sendDiscordWebhook } = require('../utils/discordService'); // ✅ IMPORTED DISCORD SERVICE
 
 class OrderController {
 
@@ -61,6 +62,18 @@ class OrderController {
           `<h3>New Manual Order</h3><p>User: ${user?.full_name}</p><p>Price: ${currency} ${price}</p>`);
       }
 
+      // ✅ DISCORD WEBHOOK: Manual Order Notification
+      await sendDiscordWebhook([{
+        title: "🛒 Manual Order Pending Approval",
+        color: 16753920, // Orange
+        fields: [
+          { name: "Product", value: product.name, inline: true },
+          { name: "User", value: user?.full_name || 'Unknown', inline: true },
+          { name: "Price Paid", value: `${currency} ${price}`, inline: true }
+        ],
+        timestamp: new Date().toISOString()
+      }]);
+
       res.status(201).json({ status: 'success', data: newOrder });
 
     } catch (error) {
@@ -75,7 +88,8 @@ class OrderController {
       const { productId, plan, promoCode } = req.body;
       const userId = req.user.id;
 
-      let { price, product } = await this._getLocalizedPrice(productId, plan, userId);
+      // ✅ FIXED: Extracted 'currency' so the Discord Webhook doesn't crash
+      let { price, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
       let discountApplied = 0;
 
       if (promoCode) {
@@ -157,6 +171,20 @@ class OrderController {
           `<h3>Thank you for your purchase!</h3><p>Please check your dashboard to submit your UID.</p>`);
       }
 
+      // ✅ DISCORD WEBHOOK: Successful Wallet Purchase
+      await sendDiscordWebhook([{
+        title: "💸 New Product Purchased (Wallet)",
+        description: "A user successfully purchased a product using their Wallet Balance.",
+        color: 5763719, // Green
+        fields: [
+          { name: "User", value: `${user.full_name || 'Unknown'} (${user.email || 'N/A'})`, inline: false },
+          { name: "Product", value: product.name, inline: true },
+          { name: "Plan", value: plan.toUpperCase().replace('_', ' '), inline: true },
+          { name: "Price Paid", value: `${currency || 'USD'} ${price}`, inline: true }
+        ],
+        timestamp: new Date().toISOString()
+      }]);
+
       res.status(200).json({ status: 'success', data: order });
 
     } catch (error) {
@@ -231,7 +259,7 @@ class OrderController {
 
         if (orderError) throw orderError;
 
-        const { data: userProfile } = await supabase.from('users').select('email').eq('id', userId).maybeSingle();
+        const { data: userProfile } = await supabase.from('users').select('email, full_name').eq('id', userId).maybeSingle();
         const finalEmail = userProfile?.email || req.user.email;
 
         if (finalEmail && licenseKey !== "PENDING_UID_ACTIVATION") {
@@ -240,6 +268,19 @@ class OrderController {
                  <p><strong>Duration:</strong> ${product.trial_hours} Hours</p>
                  <p><strong>License Key:</strong> ${licenseKey}</p>`);
         }
+
+        // ✅ DISCORD WEBHOOK: Free Trial Claimed
+        await sendDiscordWebhook([{
+          title: "🎁 Free Trial Claimed",
+          description: "A user has claimed a free trial.",
+          color: 10181046, // Purple
+          fields: [
+            { name: "User", value: `${userProfile?.full_name || 'Unknown'} (${finalEmail || 'N/A'})`, inline: false },
+            { name: "Product", value: product.name, inline: true },
+            { name: "Duration", value: `${product.trial_hours} Hours`, inline: true }
+          ],
+          timestamp: new Date().toISOString()
+        }]);
 
         res.status(200).json({ status: 'success', data: order, message: 'Trial started successfully!' });
 
@@ -403,6 +444,20 @@ class OrderController {
                  <p><strong>Submitted UID:</strong> ${uid}</p>`
             );
           }
+
+          // ✅ DISCORD WEBHOOK: Sleek UID Embed
+          await sendDiscordWebhook([{
+              title: "🛡️ Action Required: New UID Submitted",
+              description: "A user has submitted a UID for Bypass Emulator activation.",
+              color: 3447003, // Blue
+              fields: [
+                  { name: "User", value: `${user?.full_name || 'Unknown'} (${user?.email || 'N/A'})`, inline: false },
+                  { name: "Order ID", value: `\`${orderId}\``, inline: true },
+                  { name: "UID", value: `\`${uid}\``, inline: false }
+              ],
+              footer: { text: "Verify this from your Admin Dashboard" },
+              timestamp: new Date().toISOString()
+          }]);
 
           return res.status(200).json({ status: 'success', message: 'UID submitted to admin successfully.' });
       } catch (error) {

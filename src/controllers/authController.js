@@ -1,7 +1,8 @@
 const authService = require('../services/authService');
 const { registerSchema, loginSchema } = require('../utils/validators');
 const supabase = require('../config/supabase');
-const { sendEmail } = require('../utils/emailService'); // ✅ Ensure destructured import if needed
+const { sendEmail } = require('../utils/emailService'); 
+const { sendDiscordWebhook } = require('../utils/discordService'); // ✅ IMPORTED DISCORD SERVICE
 
 // Helper: Generate 6-digit code
 const generateCode = () => Math.floor(100000 + Math.random() * 900000).toString();
@@ -80,7 +81,6 @@ exports.verifyAndRegister = async (req, res) => {
     if (!code) return res.status(400).json({ status: 'error', message: 'Verification code is required' });
 
     // 1. Verify Code
-    // ✅ FIX: Use .maybeSingle() here as well
     const { data: record } = await supabase
       .from('verification_codes')
       .select('*')
@@ -109,6 +109,18 @@ exports.verifyAndRegister = async (req, res) => {
       `<h3>Welcome, ${full_name}!</h3><p>Your account has been successfully verified and created.</p>`
     );
 
+    // ✅ DISCORD WEBHOOK: New User Registration
+    await sendDiscordWebhook([{
+      title: "🎉 New User Registered",
+      description: "A new user has verified their email and joined the store.",
+      color: 3066993, // Green
+      fields: [
+        { name: "Name", value: full_name || 'Unknown', inline: true },
+        { name: "Email", value: email || 'Unknown', inline: true }
+      ],
+      timestamp: new Date().toISOString()
+    }]);
+
     res.status(201).json({
       status: 'success',
       message: 'Account verified and created successfully',
@@ -129,6 +141,18 @@ exports.login = async (req, res) => {
   try {
     const validatedData = loginSchema.parse(req.body);
     const result = await authService.login(validatedData.email, validatedData.password);
+    
+    // ✅ DISCORD WEBHOOK: User Logged In
+    await sendDiscordWebhook([{
+      title: "🔑 User Logged In",
+      description: "An existing user has accessed their account.",
+      color: 3447003, // Blue
+      fields: [
+        { name: "Email", value: validatedData.email || 'Unknown', inline: true }
+      ],
+      timestamp: new Date().toISOString()
+    }]);
+
     res.status(200).json({ status: 'success', message: 'Logged in successfully', data: result });
   } catch (error) {
     res.status(401).json({ status: 'error', message: error.message });
