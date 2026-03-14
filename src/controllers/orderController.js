@@ -32,6 +32,7 @@ class OrderController {
   async createOrder(req, res) {
     try {
       const { productId, plan, paymentMethod, transactionId } = req.body;
+      const quantity = parseInt(req.body.quantity) || 1; // ✅ QUANTITY EXTRACTED
       const userId = req.user.id;
       const file = req.file;
 
@@ -48,33 +49,42 @@ class OrderController {
         }
       }
 
-      const { price, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
+      const { price: unitPrice, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
       const { data: user } = await supabase.from('users').select('email, full_name').eq('id', userId).maybeSingle();
 
-      const { data: newOrder, error } = await supabase.from('orders').insert([{
-          user_id: userId, product_id: productId, plan, price, payment_method: paymentMethod, transaction_id: transactionId, payment_screenshot_url: screenshotUrl, status: 'pending'
-        }]).select().single();
+      const totalPaidPrice = parseFloat(req.body.price) || (unitPrice * quantity);
+      const pricePerOrder = totalPaidPrice / quantity;
+
+      // ✅ BULK INSERT LOGIC
+      const ordersToInsert = [];
+      for(let i = 0; i < quantity; i++) {
+         ordersToInsert.push({
+           user_id: userId, product_id: productId, plan, price: pricePerOrder, payment_method: paymentMethod, transaction_id: `${transactionId}-${i+1}`, payment_screenshot_url: screenshotUrl, status: 'pending'
+         });
+      }
+
+      const { data: newOrders, error } = await supabase.from('orders').insert(ordersToInsert).select();
 
       if (error) throw error;
 
       if (process.env.ADMIN_EMAIL) {
         await sendEmail(process.env.ADMIN_EMAIL, `🛒 New Order Pending: ${product.name}`, 
-          `<h3>New Manual Order</h3><p>User: ${user?.full_name}</p><p>Price: ${currency} ${price}</p>`);
+          `<h3>New Manual Order</h3><p>User: ${user?.full_name}</p><p>Quantity: ${quantity}</p><p>Total Paid: ${currency} ${totalPaidPrice}</p>`);
       }
 
-      // ✅ DISCORD WEBHOOK: Manual Order Notification
+      // ✅ DISCORD WEBHOOK
       await sendDiscordWebhook([{
         title: "🛒 Manual Order Pending Approval",
         color: 16753920, // Orange
         fields: [
-          { name: "Product", value: product.name, inline: true },
+          { name: "Product", value: `${quantity}x ${product.name}`, inline: true },
           { name: "User", value: user?.full_name || 'Unknown', inline: true },
-          { name: "Price Paid", value: `${currency} ${price}`, inline: true }
+          { name: "Total Paid", value: `${currency} ${totalPaidPrice}`, inline: true }
         ],
         timestamp: new Date().toISOString()
       }]);
 
-      res.status(201).json({ status: 'success', data: newOrder });
+      res.status(201).json({ status: 'success', data: newOrders[0] });
 
     } catch (error) {
       console.error("Order Creation Error:", error.message);
@@ -86,10 +96,20 @@ class OrderController {
   async purchaseWithWallet(req, res) {
     try {
       const { productId, plan, promoCode } = req.body;
+      const quantity = parseInt(req.body.quantity) || 1; // ✅ QUANTITY EXTRACTED
       const userId = req.user.id;
 
-      // ✅ FIXED: Extracted 'currency' so the Discord Webhook doesn't crash
-      let { price, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
+      let { price: unitPrice, product, currency } = await this._getLocalizedPrice(productId, plan, userId);
+      
+      let totalBasePrice = unitPrice * quantity;
+      let bulkDiscountPercent = 0;
+      
+      if (quantity >= 4) bulkDiscountPercent = 0.50; 
+      else if (quantity === 3) bulkDiscountPercent = 0.30; 
+      else if (quantity === 2) bulkDiscountPercent = 0.15; 
+
+      let priceAfterBulk = totalBasePrice - (totalBasePrice * bulkDiscountPercent);
+      let finalPrice = priceAfterBulk;
       let discountApplied = 0;
 
       if (promoCode) {
@@ -108,12 +128,12 @@ class OrderController {
           if (isLimitReached) return res.status(400).json({ message: 'Promo code usage limit reached.' });
 
           if (promo.type === 'percent') {
-            discountApplied = (price * promo.value) / 100;
+            discountApplied = (finalPrice * promo.value) / 100;
           } else {
             discountApplied = promo.value;
           }
           
-          price = Math.max(0, price - discountApplied);
+          finalPrice = Math.max(0, finalPrice - discountApplied);
 
           const { error: rpcError } = await supabase.rpc('increment_promo_usage', { promo_code: promo.code });
           if (rpcError) {
@@ -124,70 +144,83 @@ class OrderController {
 
       const { data: user } = await supabase.from('users').select('balance, email, full_name').eq('id', userId).maybeSingle();
       
-      if (!user || Number(user.balance) < price) {
-        return res.status(400).json({ message: 'Insufficient wallet balance' });
+      if (!user || Number(user.balance) < finalPrice) {
+        return res.status(400).json({ message: 'Insufficient wallet balance for this quantity.' });
       }
 
-      let licenseId = null;
-      let licenseKey = null;
-
+      // ✅ BULK KEY FETCHING LOGIC
+      let obtainedLicenses = [];
+      
       if (product.name === 'Bypass Emulator') {
-        licenseKey = "PENDING_UID_ACTIVATION";
+         for(let i = 0; i < quantity; i++) {
+             obtainedLicenses.push({ id: null, key: "PENDING_UID_ACTIVATION" });
+         }
       } else {
-        const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
-          p_product_id: productId, p_plan: plan, p_user_id: userId 
-        });
+         for(let i = 0; i < quantity; i++) {
+             const { data: licenseData, error: rpcError } = await supabase.rpc('assign_license_to_user', { 
+               p_product_id: productId, p_plan: plan, p_user_id: userId 
+             });
 
-        const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
+             const license = Array.isArray(licenseData) ? licenseData[0] : licenseData;
 
-        if (rpcError || !license || !license.id) {
-          return res.status(400).json({ message: `Out of Stock! No unused keys found for ${plan}.` });
-        }
-        licenseId = license.id;
-        licenseKey = license.key;
+             if (rpcError || !license || !license.id) {
+                return res.status(400).json({ message: `Out of Stock! Only enough keys to process part of your order.` });
+             }
+             obtainedLicenses.push(license);
+         }
       }
 
-      const newBalance = Number(user.balance) - price;
+      const newBalance = Number(user.balance) - finalPrice;
       await supabase.from('users').update({ balance: newBalance }).eq('id', userId);
 
-      const { data: order, error: orderError } = await supabase.from('orders').insert([{
+      // ✅ BULK ORDER INSERTION
+      const pricePerOrder = finalPrice / quantity;
+      const ordersToInsert = obtainedLicenses.map(lic => ({
           user_id: userId, 
           product_id: productId, 
           plan, 
-          price, 
+          price: pricePerOrder, 
           payment_method: 'wallet', 
-          transaction_id: `WALLET-${Date.now()}`, 
+          transaction_id: `WALLET-${Date.now()}-${Math.floor(Math.random()*1000)}`, 
           status: 'completed', 
-          license_keys_id: licenseId
-        }]).select().single();
+          license_keys_id: lic.id
+      }));
+
+      const { data: createdOrders, error: orderError } = await supabase.from('orders').insert(ordersToInsert).select();
 
       if (orderError) throw orderError;
 
-      if (user.email && licenseKey !== "PENDING_UID_ACTIVATION") {
-        await sendEmail(user.email, `✅ Order Confirmed: ${product.name}`, 
-          `<h3>Thank you for your purchase!</h3><p>Price Paid: ${price}</p><p>Key: ${licenseKey}</p>`);
-      } else if (user.email) {
-        await sendEmail(user.email, `✅ Order Confirmed: ${product.name}`, 
-          `<h3>Thank you for your purchase!</h3><p>Please check your dashboard to submit your UID.</p>`);
+      // Email formatting
+      const isPendingUid = product.name === 'Bypass Emulator';
+      const keyListHtml = isPendingUid 
+          ? `<p>Please check your dashboard to submit your UIDs (${quantity} required).</p>`
+          : `<h3>Your Keys:</h3><ul>${obtainedLicenses.map(l => `<li><strong>${l.key}</strong></li>`).join('')}</ul>`;
+
+      if (user.email) {
+        await sendEmail(user.email, `✅ Order Confirmed: ${quantity}x ${product.name}`, 
+          `<h3>Thank you for your bulk purchase!</h3>
+           <p>Total Paid: ${currency} ${finalPrice.toFixed(2)}</p>
+           ${keyListHtml}`);
       }
 
-      // ✅ DISCORD WEBHOOK: Successful Wallet Purchase
+      // ✅ DISCORD WEBHOOK
       await sendDiscordWebhook([{
-        title: "💸 New Product Purchased (Wallet)",
-        description: "A user successfully purchased a product using their Wallet Balance.",
+        title: "💸 New Bulk Purchase (Wallet)",
+        description: "A user successfully purchased products using their Wallet Balance.",
         color: 5763719, // Green
         fields: [
           { name: "User", value: `${user.full_name || 'Unknown'} (${user.email || 'N/A'})`, inline: false },
-          { name: "Product", value: product.name, inline: true },
+          { name: "Product", value: `${quantity}x ${product.name}`, inline: true },
           { name: "Plan", value: plan.toUpperCase().replace('_', ' '), inline: true },
-          { name: "Price Paid", value: `${currency || 'USD'} ${price}`, inline: true }
+          { name: "Total Paid", value: `${currency || 'USD'} ${finalPrice.toFixed(2)}`, inline: true }
         ],
         timestamp: new Date().toISOString()
       }]);
 
-      res.status(200).json({ status: 'success', data: order });
+      res.status(200).json({ status: 'success', data: createdOrders[0] });
 
     } catch (error) {
+      console.error(error);
       res.status(500).json({ status: 'error', message: error.message });
     }
   }
