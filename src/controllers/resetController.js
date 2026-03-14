@@ -57,18 +57,22 @@ class ResetController {
       }
 
       // ✅ DISCORD WEBHOOK: HWID/Credential Reset Request
-      await sendDiscordWebhook([{
-        title: "🔐 New Reset Request (HWID/Creds)",
-        description: "A user is requesting a credentials or HWID reset for their software.",
-        color: 15158332, // Red/Pink
-        fields: [
-          { name: "User", value: `${user?.full_name || 'Unknown'} (${user?.email || 'N/A'})`, inline: false },
-          { name: "Product", value: product?.name || 'Unknown Product', inline: true },
-          { name: "Order ID", value: `\`${orderId}\``, inline: true }
-        ],
-        footer: { text: "Review and process in the Admin Reset panel" },
-        timestamp: new Date().toISOString()
-      }]);
+      try {
+        await sendDiscordWebhook([{
+          title: "🔐 New Reset Request (HWID/Creds)",
+          description: "A user is requesting a credentials or HWID reset for their software.",
+          color: 15158332, // Red/Pink
+          fields: [
+            { name: "User", value: `${user?.full_name || 'Unknown'} (${user?.email || 'N/A'})`, inline: false },
+            { name: "Product", value: product?.name || 'Unknown Product', inline: true },
+            { name: "Order ID", value: `\`${orderId}\``, inline: true }
+          ],
+          footer: { text: "Review and process in the Admin Reset panel" },
+          timestamp: new Date().toISOString()
+        }]);
+      } catch (discordError) {
+        console.error("⚠️ Discord Webhook Failed on Reset Request:", discordError.message);
+      }
 
       res.status(201).json({ status: 'success', data });
 
@@ -106,21 +110,47 @@ class ResetController {
         .from('credential_requests')
         .update({ status, admin_response: adminResponse, updated_at: new Date() })
         .eq('id', id)
-        .select('*, users(email)') 
+        .select('*, users(email, full_name), products(name)') 
         .single();
 
       if (error) throw error;
 
+      // ✅ Email Notification
       if (updated.users?.email) {
         const subject = status === 'approved' ? '✅ Credentials Reset Approved' : '❌ Request Rejected';
         const body = status === 'approved' 
           ? `<p>Your credential reset request has been approved.</p><p><strong>Admin Note:</strong> ${adminResponse || 'Done.'}</p>`
           : `<p>Your request was rejected.</p><p>Reason: ${adminResponse || 'No reason provided.'}</p>`;
-        await sendEmail(updated.users.email, subject, body);
+        
+        try {
+          await sendEmail(updated.users.email, subject, body);
+        } catch (emailErr) {
+          console.error("⚠️ Failed to send Approval Email:", emailErr.message);
+        }
+      }
+
+      // ✅ DISCORD WEBHOOK: Admin Processed Request
+      try {
+        const isApproved = status === 'approved';
+        await sendDiscordWebhook([{
+          title: isApproved ? "✅ Reset Request Approved" : "❌ Reset Request Rejected",
+          description: `An Admin has ${isApproved ? 'approved' : 'rejected'} a reset request.`,
+          color: isApproved ? 5763719 : 15548997, // Green for Approve, Red for Reject
+          fields: [
+            { name: "User", value: updated.users?.full_name || updated.users?.email || 'Unknown', inline: true },
+            { name: "Product", value: updated.products?.name || 'Unknown Product', inline: true },
+            { name: "Admin Note", value: adminResponse || 'No note provided', inline: false }
+          ],
+          timestamp: new Date().toISOString()
+        }]);
+      } catch (discordError) {
+        console.error("⚠️ Discord Webhook Failed on Admin Update:", discordError.message);
       }
 
       res.status(200).json({ status: 'success', data: updated });
-    } catch (error) { res.status(500).json({ status: 'error', message: error.message }); }
+    } catch (error) { 
+      res.status(500).json({ status: 'error', message: error.message }); 
+    }
   }
 }
 
