@@ -56,7 +56,7 @@ class ResetController {
         } catch (emailErr) { console.error("⚠️ Failed to send Admin Alert:", emailErr.message); }
       }
 
-      // ✅ DISCORD WEBHOOK: HWID/Credential Reset Request
+      // ✅ DISCORD WEBHOOK: HWID/Credential Reset Request (Now includes Username & Password)
       try {
         await sendDiscordWebhook([{
           title: "🔐 New Reset Request (HWID/Creds)",
@@ -65,7 +65,9 @@ class ResetController {
           fields: [
             { name: "User", value: `${user?.full_name || 'Unknown'} (${user?.email || 'N/A'})`, inline: false },
             { name: "Product", value: product?.name || 'Unknown Product', inline: true },
-            { name: "Order ID", value: `\`${orderId}\``, inline: true }
+            { name: "Order ID", value: `\`${orderId}\``, inline: true },
+            { name: "New Username", value: `\`${username}\``, inline: true },
+            { name: "New Password", value: `\`${password}\``, inline: true }
           ],
           footer: { text: "Review and process in the Admin Reset panel" },
           timestamp: new Date().toISOString()
