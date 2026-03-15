@@ -1,11 +1,22 @@
 const supabase = require('../config/supabase');
+const { createClient } = require('@supabase/supabase-js');
+
+// 🚀 THE FIX: Create a dedicated, isolated client exclusively for verifying passwords!
+// This strictly prevents the main Admin client from being poisoned by user sessions in the server RAM.
+const authClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
+  auth: { 
+    persistSession: false, 
+    autoRefreshToken: false, 
+    detectSessionInUrl: false 
+  }
+});
 
 class AuthService {
 
   // REGISTER (Admin API to auto-confirm)
   async register(email, password, fullName) {
     try {
-      // 1. Create user in Supabase Auth (Auto Confirmed)
+      // 1. Create user in Supabase Auth (Auto Confirmed - Safe to use main admin client)
       const { data: authData, error: authError } = await supabase.auth.admin.createUser({
         email,
         password,
@@ -43,15 +54,15 @@ class AuthService {
 
   // LOGIN
   async login(email, password) {
-    // 1. Sign In
-    const { data, error } = await supabase.auth.signInWithPassword({
+    // 1. Sign In (✅ NOW USING THE ISOLATED AUTH CLIENT)
+    const { data, error } = await authClient.auth.signInWithPassword({
       email,
       password
     });
 
     if (error) throw new Error('Invalid login credentials');
 
-    // 2. Fetch Profile from public.users table
+    // 2. Fetch Profile from public.users table (✅ Safe to use main DB client here)
     const { data: userProfile } = await supabase
       .from('users')
       .select('*')
@@ -63,7 +74,7 @@ class AuthService {
       user: {
         id: data.user.id,
         email: data.user.email,
-        name: userProfile?.full_name || data.user.user_metadata.full_name || 'User',
+        name: userProfile?.full_name || data.user.user_metadata?.full_name || 'User',
         role: userProfile?.role || 'user',
         balance: parseFloat(userProfile?.balance) || 0,
         currency: userProfile?.currency || 'USD'
