@@ -20,10 +20,17 @@ if (!supabaseUrl || !supabaseKey) {
 const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     autoRefreshToken: false,
-    persistSession: false
+    persistSession: false,
+    detectSessionInUrl: false, // 👈 Ensures Node doesn't try to read browser URLs
+    // 🔥 THE FIX: Dummy Storage. This physically prevents the server from 
+    // saving User A's session into RAM and overwriting it when User B logs in.
+    storage: {
+      getItem: () => null,
+      setItem: () => null,
+      removeItem: () => null,
+    }
   },
-  // 🔥 FIX: Force fresh requests (Disable Fetch Caching)
-  // This ensures every time we ask for a key, it checks the database afresh.
+  // 🔥 Force fresh requests (Disable Fetch Caching)
   global: {
     headers: {
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',

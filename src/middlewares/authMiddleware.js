@@ -8,7 +8,7 @@ exports.protect = async (req, res, next) => {
     try {
       token = req.headers.authorization.split(' ')[1];
 
-      // 2. Verify token with Supabase
+      // 2. Verify token with Supabase (This is perfectly stateless!)
       const { data: { user }, error } = await supabase.auth.getUser(token);
 
       if (error || !user) {
