@@ -16,7 +16,6 @@ class AuthService {
       if (authError) throw authError;
 
       // 2. Upsert into public table
-      // ✅ FIX: Use .maybeSingle() to handle the return safely
       const { data: userData, error: dbError } = await supabase
         .from('users')
         .upsert([{
@@ -53,8 +52,6 @@ class AuthService {
     if (error) throw new Error('Invalid login credentials');
 
     // 2. Fetch Profile from public.users table
-    // ✅ FIX: Use .maybeSingle() to prevent "coerce to single JSON object" error
-    // if the profile is missing or found multiple times.
     const { data: userProfile } = await supabase
       .from('users')
       .select('*')
@@ -71,7 +68,6 @@ class AuthService {
         balance: parseFloat(userProfile?.balance) || 0,
         currency: userProfile?.currency || 'USD'
       },
-      // ✅ Variable name matches your Frontend expectations
       token: data.session.access_token, 
       refreshToken: data.session.refresh_token
     };
